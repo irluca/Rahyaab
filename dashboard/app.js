@@ -37,17 +37,18 @@ function badgeFor(st) {
 
 function lineChart(vals, color) {
   if (!vals.length) return '<p class="empty">هنوز نقطه‌ای ثبت نشده است — جمع‌آوری هر دقیقه یک نقطه اضافه می‌کند.</p>';
-  const w = 300, h = 56, pad = 4;
+  const w = 300, h = 96, pad = 6;
   const max = Math.max(...vals, 1);
   const step = vals.length > 1 ? (w - 2 * pad) / (vals.length - 1) : 0;
   const pts = vals.map((v, i) => [pad + i * step, h - pad - (v / max) * (h - 2 * pad)]);
   const d = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
   const area = d + ` L${pts[pts.length - 1][0].toFixed(1)} ${h - pad} L${pts[0][0].toFixed(1)} ${h - pad} Z`;
   const last = pts[pts.length - 1];
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`
-    + `<path d="${area}" fill="${color}" opacity="0.14"/>`
-    + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`
-    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/></svg>`;
+  const grid = [24, 48, 72].map(y => `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="#ffffff10" stroke-width="1"/>`).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}`
+    + `<path d="${area}" fill="${color}" opacity="0.20"/>`
+    + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>`
+    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3.5" fill="${color}"/></svg>`;
 }
 function protoClass(proto) {
   return proto === "GRE" ? "proto-GRE" : proto === "ESP" ? "proto-ESP" : "proto-other";
@@ -107,14 +108,21 @@ function renderPairs() {
     const dotCls = st === "healthy" ? "status-dot pulse" : st === "stale" ? "status-dot stale" : "status-dot down";
     return `<article class="card tunnel-box st-${st}" data-id="${p.id}">
       <div class="tunnel-head">
-        <span class="${dotCls}" title="${label}"></span>
-        <h3>${p.name}</h3>
-        <span class="proto-badge ${protoClass(p.current_protocol)} ltr">${p.current_protocol || "—"}</span>
-        <span class="badge ${cls}">${label}</span>
-        <span class="muted small">فرانت‌اند: <span class="ltr">${p.frontend_port || "—"}</span></span>
+        <span class="status-ring ${st}"><span class="${dotCls}"></span></span>
+        <div class="tunnel-title">
+          <h3>${p.name}</h3>
+          <div class="tunnel-badges">
+            <span class="proto-badge ${protoClass(p.current_protocol)} ltr">${p.current_protocol || "—"}</span>
+            <span class="badge ${cls}">${label}</span>
+            <span class="muted small">فرانت‌اند: <span class="ltr">${p.frontend_port || "—"}</span></span>
+          </div>
+        </div>
+        <div class="tunnel-kpis">
+          <div class="kpi"><span>تأخیر زنده</span><b class="ltr">${lastLat}</b></div>
+          <div class="kpi"><span>توان زنده</span><b class="ltr">${lastThr}</b></div>
+        </div>
       </div>
-      <p class="meta">داخلی: <span class="ltr">${p.inner_iran || "—"} ⇄ ${p.inner_foreign || "—"}</span> ·
-        تأخیر: <span class="ltr">${lastLat}</span> · توان: <span class="ltr">${lastThr}</span></p>
+      <p class="meta">مسیر داخلی: <span class="ltr">${p.inner_iran || "—"} ⇄ ${p.inner_foreign || "—"}</span></p>
       <div class="servers-mini">${serverMini(iran, "ایران")}${serverMini(foreign, "خارج")}</div>
       <div class="charts-row">
         <div class="chart-wrap"><div class="muted small">تأخیر تانل (ms، پینگ واقعی روی آدرس داخلی)</div>${lineChart(lat, "var(--accent)")}</div>
