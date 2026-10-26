@@ -66,14 +66,7 @@
         <button class="counter" data-filter="stale"><b id="c-stale">—</b><span>هشدار / قدیمی</span></button>
         <button class="counter" data-filter="down"><b id="c-down">—</b><span>قطع / دسترس‌ناپذیر</span></button>
       </div>
-      <div class="kpis">
-        <div class="card kpi"><span class="kpi-label">سرورهای ثبت‌شده</span><b id="k-servers">—</b></div>
-        <div class="card kpi"><span class="kpi-label">جفت‌های فعال</span><b id="k-pairs">—</b></div>
-        <div class="card kpi"><span class="kpi-label">پروتکل جاری (آخرین جفت)</span><b id="k-proto" class="ltr">—</b></div>
-        <div class="card kpi"><span class="kpi-label">رویدادهای اخیر</span><b id="k-events">—</b></div>
-        <div class="card kpi"><span class="kpi-label">تأخیر تانل (تازه‌ترین)</span><b id="k-latency" class="ltr">—</b></div>
-        <div class="card kpi"><span class="kpi-label">توان تانل‌ها (تازه‌ترین)</span><b id="k-throughput" class="ltr">—</b></div>
-      </div>
+      <div id="stat-cards" class="stat-grid"></div>
       <h2>جفت‌ها</h2>
       <div id="pair-cards" class="cards"></div>
       <p id="pairs-empty" class="muted" hidden>هنوز جفتی ساخته نشده است. از بخش جفت‌ها یکی بسازید.</p>

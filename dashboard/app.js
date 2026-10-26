@@ -40,12 +40,35 @@ function lineChart(vals, color) {
   const w = 300, h = 56, pad = 4;
   const max = Math.max(...vals, 1);
   const step = vals.length > 1 ? (w - 2 * pad) / (vals.length - 1) : 0;
-  let d = "";
-  vals.forEach((v, i) => {
-    const x = pad + i * step, y = h - pad - (v / max) * (h - 2 * pad);
-    d += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
-  });
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="${color}" stroke-width="2"/></svg>`;
+  const pts = vals.map((v, i) => [pad + i * step, h - pad - (v / max) * (h - 2 * pad)]);
+  const d = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  const area = d + ` L${pts[pts.length - 1][0].toFixed(1)} ${h - pad} L${pts[0][0].toFixed(1)} ${h - pad} Z`;
+  const last = pts[pts.length - 1];
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`
+    + `<path d="${area}" fill="${color}" opacity="0.14"/>`
+    + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`
+    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/></svg>`;
+}
+function protoClass(proto) {
+  return proto === "GRE" ? "proto-GRE" : proto === "ESP" ? "proto-ESP" : "proto-other";
+}
+function metricFresh(m) {
+  if (!m) return "unknown";
+  return (Date.now() / 1000 - m.created_at) < 180 ? "fresh" : "stale";
+}
+function serverMini(server, roleLabel) {
+  if (!server) return "";
+  const m = (serverMetrics[server.id] || []).slice(-1)[0];
+  const fresh = metricFresh(m);
+  const dot = fresh === "fresh" ? "mini-dot" : fresh === "stale" ? "mini-dot stale" : "mini-dot unknown";
+  if (!m) return `<div class="server-mini"><div class="server-mini-head"><span class="${dot}"></span><b>${roleLabel} — ${server.name}</b>`
+    + `<span class="host ltr">${server.host}</span></div><p class="muted small">هنوز متریکی ثبت نشده است.</p></div>`;
+  return `<div class="server-mini"><div class="server-mini-head"><span class="${dot}"></span><b>${roleLabel} — ${server.name}</b>`
+    + `<span class="host ltr">${server.host}</span></div>`
+    + `<div class="mini-row"><span>بار CPU</span><b class="ltr">${m.load1 ?? "—"}</b></div>`
+    + `<div class="mini-row"><span>حافظه</span><b>${m.mem_used_pct ?? "—"}٪</b></div>${bar(m.mem_used_pct, "grad-mem")}`
+    + `<div class="mini-row"><span>دیسک</span><b>${m.disk_used_pct ?? "—"}٪</b></div>${bar(m.disk_used_pct, "grad-disk")}`
+    + `<div class="mini-row"><span>آپتایم</span><b>${fmtUptime(m.uptime_seconds)}</b></div></div>`;
 }
 function fmtUptime(sec) {
   if (sec == null) return "—";
@@ -77,24 +100,34 @@ function renderPairs() {
     const scoreRows = scores.length ? scores.map(([name, score]) =>
       `<div class="score-row"><span class="ltr">${name}</span>${bar(score, "green")}<span class="ltr">${score}</span></div>`).join("")
       : '<p class="muted small">امتیازی ثبت نشده است.</p>';
-    return `<article class="card pair-card" data-id="${p.id}">
-      <h3>${p.name}</h3>
-      <span class="badge ${cls}">${label}</span>
-      <p class="meta">پروتکل جاری: <span class="ltr">${p.current_protocol || "—"}</span> ·
-        داخلی: <span class="ltr">${p.inner_iran || "—"} / ${p.inner_foreign || "—"}</span> ·
+    const iran = state.servers.find(s => s.id === p.iran_server_id);
+    const foreign = state.servers.find(s => s.id === p.foreign_server_id);
+    const dotCls = st === "healthy" ? "status-dot pulse" : st === "stale" ? "status-dot stale" : "status-dot down";
+    return `<article class="card tunnel-box st-${st}" data-id="${p.id}">
+      <div class="tunnel-head">
+        <span class="${dotCls}" title="${label}"></span>
+        <h3>${p.name}</h3>
+        <span class="proto-badge ${protoClass(p.current_protocol)} ltr">${p.current_protocol || "—"}</span>
+        <span class="badge ${cls}">${label}</span>
+        <span class="muted small">فرانت‌اند: <span class="ltr">${p.frontend_port || "—"}</span></span>
+      </div>
+      <p class="meta">داخلی: <span class="ltr">${p.inner_iran || "—"} ⇄ ${p.inner_foreign || "—"}</span> ·
         تأخیر: <span class="ltr">${lastLat}</span> · توان: <span class="ltr">${lastThr}</span></p>
-      <div class="chart-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${lineChart(hist.map(x => x.healthy ? 1 : 0), "var(--green)")}</div>
-      <div class="chart-wrap"><div class="muted small">تأخیر تانل (میلی‌ثانیه، پینگ واقعی روی آدرس داخلی)</div>${lineChart(lat, "var(--accent)")}</div>
-      <div class="chart-wrap"><div class="muted small">توان تانل (کیلوبیت بر ثانیه، از شمارنده واقعی اینترفیس)</div>${lineChart(thr, "var(--green)")}</div>
+      <div class="servers-mini">${serverMini(iran, "ایران")}${serverMini(foreign, "خارج")}</div>
+      <div class="charts-row">
+        <div class="chart-wrap"><div class="muted small">تأخیر تانل (ms، پینگ واقعی روی آدرس داخلی)</div>${lineChart(lat, "var(--accent)")}</div>
+        <div class="chart-wrap"><div class="muted small">توان تانل (kbps، شمارنده واقعی اینترفیس)</div>${lineChart(thr, "var(--green)")}</div>
+      </div>
+      <div class="chart-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${lineChart(hist.map(x => x.healthy ? 1 : 0), "var(--teal)")}</div>
       <div class="chart-wrap"><div class="muted small">امتیاز پروتکل‌ها (بنچمارک)</div>${scoreRows}</div>
       <div class="actions">
-        <button class="btn ghost" data-act="refresh">تازه‌سازی وضعیت</button>
-        <button class="btn ghost" data-act="restart">ری‌استارت نگهبان</button>
+        <button class="act-btn green" data-act="refresh">↻ تازه‌سازی وضعیت</button>
+        <button class="act-btn blue" data-act="restart">⟳ ری‌استارت نگهبان</button>
       </div>
     </article>`;
   }).join("");
   $("#pairs-empty").hidden = state.pairs.length > 0;
-  $$("#pair-cards .pair-card").forEach(card => {
+  $$("#pair-cards .tunnel-box").forEach(card => {
     const id = card.dataset.id;
     card.querySelector('[data-act="refresh"]').onclick = async () => {
       await api("POST", "/api/jobs", { type: "healer_status", pair_id: +id });
@@ -118,8 +151,8 @@ function renderTables() {
     return `<article class="card server-card"><h3>${s.name}</h3>
       <p class="meta ltr">${s.host}:${s.port}</p>
       <p class="meta">بار CPU: <span class="ltr">${m.load1 ?? "—"}</span> · آپتایم: ${fmtUptime(m.uptime_seconds)}</p>
-      <div class="muted small">حافظه ${m.mem_used_pct ?? "—"}٪</div>${bar(m.mem_used_pct, m.mem_used_pct > 85 ? "amber" : "green")}
-      <div class="muted small">دیسک ${m.disk_used_pct ?? "—"}٪</div>${bar(m.disk_used_pct, m.disk_used_pct > 85 ? "amber" : "")}</article>`;
+      <div class="muted small">حافظه ${m.mem_used_pct ?? "—"}٪</div>${bar(m.mem_used_pct, "grad-mem")}
+      <div class="muted small">دیسک ${m.disk_used_pct ?? "—"}٪</div>${bar(m.disk_used_pct, "grad-disk")}</article>`;
   }).join("");
   $("#server-table-wrap").innerHTML = state.servers.length ? `<table><tr><th>نام</th><th>هاست</th><th>کاربر</th><th></th></tr>${
     state.servers.map(s => `<tr><td>${s.name}</td><td class="ltr">${s.host}:${s.port}</td><td class="ltr">${s.username}</td>
@@ -148,10 +181,6 @@ function renderCounters() {
   state.pairs.forEach(p => counts[pairState(p)]++);
   $("#c-all").textContent = counts.all; $("#c-healthy").textContent = counts.healthy;
   $("#c-stale").textContent = counts.stale; $("#c-down").textContent = counts.down;
-  $("#k-servers").textContent = state.servers.length;
-  $("#k-pairs").textContent = state.pairs.length;
-  $("#k-proto").textContent = state.pairs.length ? (state.pairs[state.pairs.length - 1].current_protocol || "—") : "—";
-  $("#k-events").textContent = state.events.length;
   const lats = [], thrs = [];
   state.pairs.forEach(p => {
     const pm = pairMetrics[p.id] || [];
@@ -160,8 +189,25 @@ function renderCounters() {
     if (lat) lats.push(lat.latency_ms);
     if (thr) thrs.push(thr.rx_kbps + thr.tx_kbps);
   });
-  $("#k-latency").textContent = lats.length ? (lats.reduce((a, b) => a + b, 0) / lats.length).toFixed(1) + " ms" : "—";
-  $("#k-throughput").textContent = thrs.length ? thrs.reduce((a, b) => a + b, 0).toFixed(1) + " kbps" : "—";
+  const avgLat = lats.length ? (lats.reduce((a, b) => a + b, 0) / lats.length).toFixed(1) + " ms" : "—";
+  const totThr = thrs.length ? thrs.reduce((a, b) => a + b, 0).toFixed(1) + " kbps" : "—";
+  const netIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.5 12h9"/></svg>';
+  const srvIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="4.5" rx="1.5"/><rect x="3" y="10" width="18" height="4.5" rx="1.5"/><rect x="3" y="16" width="18" height="4.5" rx="1.5"/></svg>';
+  const gaugeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14a8 8 0 1 1 16 0"/><path d="M12 14l4-5"/></svg>';
+  const boltIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/></svg>';
+  $("#stat-cards").innerHTML =
+    `<div class="card stat-card c-green" data-stat="pairs"><div class="stat-chip chip-green">${netIcon}</div>`
+    + `<h3>جفت‌ها</h3><div class="stat-value">${counts.all}</div><div class="stat-sub">${counts.healthy} سالم</div></div>`
+    + `<div class="card stat-card c-blue" data-stat="servers"><div class="stat-chip chip-blue">${srvIcon}</div>`
+    + `<h3>سرورها</h3><div class="stat-value">${state.servers.length}</div><div class="stat-sub">ثبت‌شده در فلیت</div></div>`
+    + `<div class="card stat-card c-purple"><div class="stat-chip chip-purple">${gaugeIcon}</div>`
+    + `<h3>تأخیر تانل‌ها</h3><div class="stat-value ltr">${avgLat}</div><div class="stat-sub">میانگین تازه‌ترین نمونه</div></div>`
+    + `<div class="card stat-card c-orange"><div class="stat-chip chip-orange">${boltIcon}</div>`
+    + `<h3>توان تانل‌ها</h3><div class="stat-value ltr">${totThr}</div><div class="stat-sub">مجموع تازه‌ترین نمونه</div></div>`;
+  $$("#stat-cards [data-stat]").forEach(card => card.onclick = () => {
+    if (card.dataset.stat === "pairs") { state.filter = "all"; showSection("overview"); renderCounters(); renderPairs(); }
+    if (card.dataset.stat === "servers") showSection("servers");
+  });
   $$("#counter-strip .counter").forEach(b => b.classList.toggle("active", b.dataset.filter === state.filter));
 }
 
