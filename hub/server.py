@@ -32,7 +32,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from . import auth, healerctl
+from . import auth, healerctl, metrics
 from .jobs import HANDLERS, Worker
 from .ssh import executor_for_server
 from .store import Store
@@ -58,14 +58,77 @@ def _public_pair(row: dict) -> dict:
     return row  # pairs carry no secrets
 
 
+class Collector(threading.Thread):
+    """Samples real metrics every minute: per-server load/memory/disk/
+    uptime and per-pair tunnel latency + carrier byte counters.
+
+    Failures are swallowed per item: a dead server must not stop the
+    collector, and a missing sample is simply a gap in the chart.
+    """
+
+    def __init__(self, store: Store, make_executor=None,
+                 interval: float = 60.0, first_delay: float = 5.0):
+        super().__init__(daemon=True, name="rahyaab-collector")
+        self.store = store
+        self.make_executor = make_executor
+        self.interval = interval
+        self.first_delay = first_delay
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _executor(self, server: dict):
+        fake = self.make_executor(server) if self.make_executor else None
+        return executor_for_server(server, fake=fake)
+
+    def run(self) -> None:
+        if self._stop.wait(self.first_delay):
+            return
+        while not self._stop.is_set():
+            try:
+                self.collect_once()
+            except Exception:
+                pass
+            self._stop.wait(self.interval)
+
+    def collect_once(self) -> None:
+        seen_servers: set[int] = set()
+        for pair in self.store.list_pairs():
+            healer_server = self.store.get_server(pair["healer_server_id"])
+            if healer_server is None:
+                continue
+            for server_id in (pair["iran_server_id"], pair["foreign_server_id"]):
+                if server_id in seen_servers:
+                    continue
+                seen_servers.add(server_id)
+                server = self.store.get_server(server_id)
+                if server is None:
+                    continue
+                try:
+                    self.store.add_server_metric(
+                        server_id, metrics.collect_server(self._executor(server)))
+                except Exception:
+                    pass
+            try:
+                self.store.add_pair_metric(
+                    pair["id"], metrics.collect_pair(self._executor(healer_server), pair))
+            except Exception:
+                pass
+
+
 class Hub:
-    def __init__(self, store: Store, make_executor=None):
+    def __init__(self, store: Store, make_executor=None, enable_collector: bool = False):
         self.store = store
         self.make_executor = make_executor
         # Set by serve() when TLS is on. The session cookie is then
         # Secure-only, and HSTS is advertised: once the panel is
         # public, browsers must never send the cookie over plain HTTP.
         self.tls_enabled = False
+        self.collector = None
+        if enable_collector:
+            self.collector = Collector(store, make_executor=make_executor)
+            self.collector.start()
         self._login_failures: dict[str, list[float]] = {}
         self._failures_lock = threading.Lock()
         self.worker = Worker(store, make_executor=make_executor)
@@ -376,6 +439,18 @@ def make_handler(hub: Hub, static_dir=None):
                     raise ApiError(404, "pair not found")
                 return 200, {"history": hub.store.list_healer_history(
                     int(m.group(1)))}, None, False
+            m = re.fullmatch(r"/api/servers/(\d+)/metrics", path)
+            if m and method == "GET":
+                if hub.store.get_server(int(m.group(1))) is None:
+                    raise ApiError(404, "server not found")
+                return 200, {"metrics": hub.store.list_server_metrics(
+                    int(m.group(1)))}, None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/metrics", path)
+            if m and method == "GET":
+                if hub.store.get_pair(int(m.group(1))) is None:
+                    raise ApiError(404, "pair not found")
+                return 200, {"metrics": hub.store.list_pair_metrics(
+                    int(m.group(1)))}, None, False
             if path == "/api/jobs" and method == "GET":
                 return 200, {"jobs": hub.store.list_jobs()}, None, False
             if path == "/api/jobs" and method == "POST":
@@ -424,8 +499,9 @@ def make_handler(hub: Hub, static_dir=None):
 
 def serve(store: Store, host: str = "127.0.0.1", port: int = 8890,
           make_executor=None, static_dir=None,
-          tls_cert: str | None = None, tls_key: str | None = None) -> ThreadingHTTPServer:
-    hub = Hub(store, make_executor=make_executor)
+          tls_cert: str | None = None, tls_key: str | None = None,
+          enable_collector: bool = False) -> ThreadingHTTPServer:
+    hub = Hub(store, make_executor=make_executor, enable_collector=enable_collector)
     if static_dir is None:
         from pathlib import Path
         candidate = Path(__file__).resolve().parent.parent / "dashboard"

@@ -6,6 +6,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 let state = { servers: [], pairs: [], events: [], filter: "all", section: "overview" };
 let histories = {};
+let serverMetrics = {};
+let pairMetrics = {};
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -33,19 +35,27 @@ function badgeFor(st) {
            down: ["قطع / دسترس‌ناپذیر", "down"] }[st];
 }
 
-function stepChart(points, key) {
-  if (!points.length) return '<p class="empty">هنوز نقطه‌ای ثبت نشده است — بعد از اولین تازه‌سازی وضعیت، نمودار اینجا کشیده می‌شود.</p>';
+function lineChart(vals, color) {
+  if (!vals.length) return '<p class="empty">هنوز نقطه‌ای ثبت نشده است — جمع‌آوری هر دقیقه یک نقطه اضافه می‌کند.</p>';
   const w = 300, h = 56, pad = 4;
-  const vals = points.map(p => (key === "healthy" ? (p.healthy ? 1 : 0) : (p.heartbeat_age_seconds ?? 0)));
-  const max = key === "healthy" ? 1 : Math.max(...vals, 1);
-  const step = points.length > 1 ? (w - 2 * pad) / (points.length - 1) : 0;
+  const max = Math.max(...vals, 1);
+  const step = vals.length > 1 ? (w - 2 * pad) / (vals.length - 1) : 0;
   let d = "";
   vals.forEach((v, i) => {
     const x = pad + i * step, y = h - pad - (v / max) * (h - 2 * pad);
     d += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
   });
-  const color = key === "healthy" ? "var(--green)" : "var(--accent)";
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="${color}" stroke-width="2"/></svg>`;
+}
+function fmtUptime(sec) {
+  if (sec == null) return "—";
+  const days = Math.floor(sec / 86400);
+  if (days > 0) return days + " روز";
+  return Math.floor(sec / 3600) + " ساعت";
+}
+function bar(pct, cls) {
+  const p = Math.max(0, Math.min(100, pct ?? 0));
+  return `<div class="bar"><div class="fill ${cls || ""}" style="width:${p}%"></div></div>`;
 }
 
 async function loadPairHistory(pair) {
@@ -58,13 +68,25 @@ function renderPairs() {
   $("#pair-cards").innerHTML = list.map(p => {
     const st = pairState(p), [label, cls] = badgeFor(st);
     const hist = histories[p.id] || [];
+    const pm = pairMetrics[p.id] || [];
+    const lat = pm.filter(x => x.latency_ms != null).map(x => x.latency_ms);
+    const thr = pm.filter(x => x.rx_kbps != null).map(x => x.rx_kbps + x.tx_kbps);
+    const lastLat = lat.length ? lat[lat.length - 1].toFixed(1) + " ms" : "—";
+    const lastThr = thr.length ? thr[thr.length - 1].toFixed(1) + " kbps" : "—";
+    const scores = Object.entries(p.candidate_scores || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const scoreRows = scores.length ? scores.map(([name, score]) =>
+      `<div class="score-row"><span class="ltr">${name}</span>${bar(score, "green")}<span class="ltr">${score}</span></div>`).join("")
+      : '<p class="muted small">امتیازی ثبت نشده است.</p>';
     return `<article class="card pair-card" data-id="${p.id}">
       <h3>${p.name}</h3>
       <span class="badge ${cls}">${label}</span>
       <p class="meta">پروتکل جاری: <span class="ltr">${p.current_protocol || "—"}</span> ·
-        داخلی: <span class="ltr">${p.inner_iran || "—"} / ${p.inner_foreign || "—"}</span></p>
-      <div class="chart-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${stepChart(hist, "healthy")}</div>
-      <div class="chart-wrap"><div class="muted small">سن هارت‌بیت (ثانیه)</div>${stepChart(hist, "age")}</div>
+        داخلی: <span class="ltr">${p.inner_iran || "—"} / ${p.inner_foreign || "—"}</span> ·
+        تأخیر: <span class="ltr">${lastLat}</span> · توان: <span class="ltr">${lastThr}</span></p>
+      <div class="chart-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${lineChart(hist.map(x => x.healthy ? 1 : 0), "var(--green)")}</div>
+      <div class="chart-wrap"><div class="muted small">تأخیر تانل (میلی‌ثانیه، پینگ واقعی روی آدرس داخلی)</div>${lineChart(lat, "var(--accent)")}</div>
+      <div class="chart-wrap"><div class="muted small">توان تانل (کیلوبیت بر ثانیه، از شمارنده واقعی اینترفیس)</div>${lineChart(thr, "var(--green)")}</div>
+      <div class="chart-wrap"><div class="muted small">امتیاز پروتکل‌ها (بنچمارک)</div>${scoreRows}</div>
       <div class="actions">
         <button class="btn ghost" data-act="refresh">تازه‌سازی وضعیت</button>
         <button class="btn ghost" data-act="restart">ری‌استارت نگهبان</button>
@@ -89,6 +111,16 @@ function renderPairs() {
 
 function renderTables() {
   const serverName = id => (state.servers.find(s => s.id === id) || {}).name || id;
+  $("#server-cards").innerHTML = state.servers.map(s => {
+    const m = (serverMetrics[s.id] || []).slice(-1)[0];
+    if (!m) return `<article class="card server-card"><h3>${s.name}</h3>
+      <p class="meta ltr">${s.host}:${s.port}</p><p class="muted small">هنوز متریکی ثبت نشده است.</p></article>`;
+    return `<article class="card server-card"><h3>${s.name}</h3>
+      <p class="meta ltr">${s.host}:${s.port}</p>
+      <p class="meta">بار CPU: <span class="ltr">${m.load1 ?? "—"}</span> · آپتایم: ${fmtUptime(m.uptime_seconds)}</p>
+      <div class="muted small">حافظه ${m.mem_used_pct ?? "—"}٪</div>${bar(m.mem_used_pct, m.mem_used_pct > 85 ? "amber" : "green")}
+      <div class="muted small">دیسک ${m.disk_used_pct ?? "—"}٪</div>${bar(m.disk_used_pct, m.disk_used_pct > 85 ? "amber" : "")}</article>`;
+  }).join("");
   $("#server-table-wrap").innerHTML = state.servers.length ? `<table><tr><th>نام</th><th>هاست</th><th>کاربر</th><th></th></tr>${
     state.servers.map(s => `<tr><td>${s.name}</td><td class="ltr">${s.host}:${s.port}</td><td class="ltr">${s.username}</td>
     <td><button class="btn ghost" data-del="${s.id}">حذف</button></td></tr>`).join("")}</table>`
@@ -120,6 +152,16 @@ function renderCounters() {
   $("#k-pairs").textContent = state.pairs.length;
   $("#k-proto").textContent = state.pairs.length ? (state.pairs[state.pairs.length - 1].current_protocol || "—") : "—";
   $("#k-events").textContent = state.events.length;
+  const lats = [], thrs = [];
+  state.pairs.forEach(p => {
+    const pm = pairMetrics[p.id] || [];
+    const lat = [...pm].reverse().find(x => x.latency_ms != null);
+    const thr = [...pm].reverse().find(x => x.rx_kbps != null);
+    if (lat) lats.push(lat.latency_ms);
+    if (thr) thrs.push(thr.rx_kbps + thr.tx_kbps);
+  });
+  $("#k-latency").textContent = lats.length ? (lats.reduce((a, b) => a + b, 0) / lats.length).toFixed(1) + " ms" : "—";
+  $("#k-throughput").textContent = thrs.length ? thrs.reduce((a, b) => a + b, 0).toFixed(1) + " kbps" : "—";
   $$("#counter-strip .counter").forEach(b => b.classList.toggle("active", b.dataset.filter === state.filter));
 }
 
@@ -129,6 +171,16 @@ async function loadAll() {
       api("GET", "/api/servers"), api("GET", "/api/pairs"), api("GET", "/api/events")]);
     state.servers = s.servers; state.pairs = p.pairs; state.events = ev.events;
     await Promise.all(state.pairs.map(loadPairHistory));
+    await Promise.all([
+      ...state.servers.map(async sv => {
+        try { const d = await api("GET", `/api/servers/${sv.id}/metrics`); serverMetrics[sv.id] = d.metrics; }
+        catch { serverMetrics[sv.id] = []; }
+      }),
+      ...state.pairs.map(async pr => {
+        try { const d = await api("GET", `/api/pairs/${pr.id}/metrics`); pairMetrics[pr.id] = d.metrics; }
+        catch { pairMetrics[pr.id] = []; }
+      }),
+    ]);
     renderCounters(); renderPairs(); renderTables();
     $("#conn-dot").className = "dot ok"; $("#conn-text").textContent = "متصل به هاب";
   } catch (e) {

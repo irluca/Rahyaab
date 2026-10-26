@@ -81,6 +81,25 @@ CREATE TABLE IF NOT EXISTS healer_history (
     healthy INTEGER NOT NULL,
     heartbeat_age_seconds REAL
 );
+CREATE TABLE IF NOT EXISTS server_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL REFERENCES servers(id),
+    created_at REAL NOT NULL,
+    load1 REAL,
+    mem_used_pct REAL,
+    disk_used_pct REAL,
+    uptime_seconds REAL
+);
+CREATE TABLE IF NOT EXISTS pair_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_id INTEGER NOT NULL REFERENCES pairs(id),
+    created_at REAL NOT NULL,
+    latency_ms REAL,
+    rx_bytes INTEGER,
+    tx_bytes INTEGER,
+    rx_kbps REAL,
+    tx_kbps REAL
+);
 """
 
 
@@ -307,3 +326,56 @@ class Store:
         with self._connect() as conn:
             return [_decode(r) for r in conn.execute(
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))]
+
+    # -- metrics (Phase 3.5: real numbers for the rich dashboard) ---------
+    def add_server_metric(self, server_id: int, data: dict,
+                          created_at: float | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO server_metrics (server_id, created_at, load1,"
+                " mem_used_pct, disk_used_pct, uptime_seconds)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (server_id, created_at or time.time(), data.get("load1"),
+                 data.get("mem_used_pct"), data.get("disk_used_pct"),
+                 data.get("uptime_seconds")))
+
+    def list_server_metrics(self, server_id: int, limit: int = 120) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT created_at, load1, mem_used_pct, disk_used_pct,"
+                " uptime_seconds FROM server_metrics WHERE server_id = ?"
+                " ORDER BY id DESC LIMIT ?", (server_id, limit))
+            points = [dict(r) for r in rows]
+            points.reverse()
+            return points
+
+    def add_pair_metric(self, pair_id: int, data: dict,
+                        created_at: float | None = None) -> None:
+        now = created_at or time.time()
+        rx_kbps = tx_kbps = None
+        with self._connect() as conn:
+            prev = conn.execute(
+                "SELECT created_at, rx_bytes, tx_bytes FROM pair_metrics"
+                " WHERE pair_id = ? AND rx_bytes IS NOT NULL"
+                " ORDER BY id DESC LIMIT 1", (pair_id,)).fetchone()
+            if prev and data.get("rx_bytes") is not None and prev["rx_bytes"] is not None:
+                dt = now - prev["created_at"]
+                if dt > 0:
+                    rx_kbps = max(0.0, (data["rx_bytes"] - prev["rx_bytes"]) * 8 / dt / 1000)
+                    tx_kbps = max(0.0, (data["tx_bytes"] - prev["tx_bytes"]) * 8 / dt / 1000)
+            conn.execute(
+                "INSERT INTO pair_metrics (pair_id, created_at, latency_ms,"
+                " rx_bytes, tx_bytes, rx_kbps, tx_kbps)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (pair_id, now, data.get("latency_ms"), data.get("rx_bytes"),
+                 data.get("tx_bytes"), rx_kbps, tx_kbps))
+
+    def list_pair_metrics(self, pair_id: int, limit: int = 180) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT created_at, latency_ms, rx_bytes, tx_bytes, rx_kbps, tx_kbps"
+                " FROM pair_metrics WHERE pair_id = ? ORDER BY id DESC LIMIT ?",
+                (pair_id, limit))
+            points = [dict(r) for r in rows]
+            points.reverse()
+            return points

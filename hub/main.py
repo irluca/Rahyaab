@@ -42,7 +42,8 @@ def main(argv=None) -> int:
         parser.error("--tls-cert and --tls-key must be given together")
     store = Store(args.db)
     server = serve(store, host=args.host, port=args.port,
-                   tls_cert=args.tls_cert, tls_key=args.tls_key)
+                   tls_cert=args.tls_cert, tls_key=args.tls_key,
+                   enable_collector=True)
     scheme = "https" if args.tls_cert else "http"
     print(f"rahyaab hub listening on {scheme}://{args.host}:{args.port} "
           f"(db: {args.db})", flush=True)
@@ -52,6 +53,8 @@ def main(argv=None) -> int:
         pass
     finally:
         server.hub.worker.stop()
+        if server.hub.collector is not None:
+            server.hub.collector.stop()
     return 0
 
 

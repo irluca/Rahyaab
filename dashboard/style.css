@@ -76,6 +76,15 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .chart-wrap { margin-top: 12px; }
 .chart-wrap svg { width: 100%; height: 64px; display: block; }
 .chart-wrap .empty { color: var(--muted); font-size: 13px; }
+.bar { background: var(--panel2); border-radius: 999px; height: 10px; overflow: hidden; margin: 4px 0 10px; }
+.fill { height: 100%; background: var(--accent); }
+.fill.green { background: var(--green); }
+.fill.amber { background: var(--amber); }
+.score-row { display: grid; grid-template-columns: 110px 1fr 52px; gap: 8px; align-items: center;
+  font-size: 13px; margin: 4px 0; }
+.score-row .bar { margin: 0; }
+.server-card .meta { color: var(--muted); font-size: 13px; }
+.server-card h3 { margin: 0 0 4px; }
 
 table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); overflow: hidden; }
 th, td { padding: 10px 12px; text-align: start; border-bottom: 1px solid var(--line); font-size: 14px; }
