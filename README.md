@@ -47,4 +47,8 @@ panel — no configs, nodes or users, by any path.
   runbook in `docs/phase4-runbook.md`); BLOCKED on the user
   authorizing the hub public key on both servers. Hub deploy keypair
   at .hub-key/ (private key git-ignored, never pushed).
-- Phase 5 (private GitHub repo push + tag + final report) — pending.
+- Phase 5 (private GitHub repo push + tag + final report) — pending
+  push: local repo committed (`b300f50`, branch `main`, hub key
+  verified absent) and runbook in `docs/phase5-runbook.md`; push
+  waits on the user creating the empty private repo and adding the
+  VM deploy key. The v1.0 tag waits for Phase 4's live tests.
