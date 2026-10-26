@@ -13,6 +13,13 @@
   --amber: #9a6700; --red: #cf222e;
 }
 * { box-sizing: border-box; }
+/* The bug in the 2026-10-26 evening screenshot: author display rules
+   (.app grid, .auth-wrap grid, .palette grid, .auth-card form flex)
+   overrode the browser's built-in [hidden] display:none, so the
+   login/setup card, the command palette AND the dashboard all
+   rendered at once. This rule restores hidden everywhere, above any
+   layout rule in this file. */
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font-family: "Vazirmatn", Tahoma, "Segoe UI", sans-serif; font-size: 15px; }
 button, input, select { font: inherit; }
