@@ -1,0 +1,14 @@
+[Unit]
+Description=Best Tunnel resident agent (restart own tunnel units under policy, report)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=10
+ExecStart=/usr/local/bin/best-tunnel-agent --config /etc/best-tunnel/agent.toml
+
+[Install]
+WantedBy=multi-user.target

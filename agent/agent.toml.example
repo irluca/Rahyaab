@@ -1,0 +1,14 @@
+# best-tunnel-agent config (copy to /etc/best-tunnel/agent.toml and edit).
+# The units list is the agent's entire authority: it restarts ONLY these
+# units, and only when they are not active. Nothing else on the host is
+# ever touched. Protocol switching is not implemented in this version
+# (decision D2: restart + report only).
+
+role = "iran"
+units = ["best-tunnel-prod-p1-rathole-server"]
+delivery_port = 443
+check_interval_secs = 15
+max_restarts_per_hour = 3
+restart_cooldown_secs = 60
+heartbeat_file = "/var/lib/best-tunnel/agent-heartbeat.json"
+events_file = "/var/log/best-tunnel/agent-events.jsonl"

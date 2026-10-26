@@ -1,0 +1,11 @@
+[package]
+name = "best-tunnel-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Resident Tunnel Studio Pro agent: watches only the program's own tunnel units, restarts a dead one under policy, and reports. No network listener, no self-update, no protocol switching."
+
+# Deliberately zero dependencies: the agent must build on a filtered
+# route with nothing but rustc. Everything below is std-only, and the
+# code avoids APIs newer than Rust 1.75 (Ubuntu 24.04's apt rustc) so
+# the build does not need rustup either.
+[dependencies]

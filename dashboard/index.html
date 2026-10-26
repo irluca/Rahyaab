@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>رهیاب — کنترل‌صفحه تانل</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="auth-view" class="auth-wrap" hidden>
+  <div class="auth-card">
+    <div class="logo">رهیاب</div>
+    <p class="muted">کنترل‌صفحه تانل‌های بین سرورها</p>
+    <form id="setup-form" hidden>
+      <h2>راه‌اندازی اول</h2>
+      <p class="muted small">حساب اپراتور هاب را بسازید. این فرم فقط وقتی هیچ حسابی نیست نشان داده می‌شود.</p>
+      <label>نام کاربری <input name="username" minlength="3" required></label>
+      <label>گذرواژه <input name="password" type="password" minlength="8" required></label>
+      <button type="submit">ساختن حساب</button>
+    </form>
+    <form id="login-form" hidden>
+      <h2>ورود</h2>
+      <label>نام کاربری <input name="username" required></label>
+      <label>گذرواژه <input name="password" type="password" required></label>
+      <button type="submit">ورود</button>
+    </form>
+    <p id="auth-error" class="error" hidden></p>
+  </div>
+</div>
+
+<div id="app" class="app" hidden>
+  <aside class="sidebar" id="sidebar">
+    <div class="logo-row"><span class="logo">رهیاب</span><button id="sidebar-close" class="icon-btn">✕</button></div>
+    <nav class="nav">
+      <a href="#overview" data-section="overview" class="active">داشبورد</a>
+      <a href="#pairs" data-section="pairs">جفت‌ها</a>
+      <a href="#servers" data-section="servers">سرورها</a>
+      <a href="#events" data-section="events">رویدادها</a>
+    </nav>
+    <div class="side-foot">
+      <span id="conn-dot" class="dot ok"></span><span id="conn-text">متصل به هاب</span>
+      <button id="logout-btn" class="btn ghost">خروج</button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <button id="sidebar-open" class="icon-btn">☰</button>
+      <h1 id="page-title">داشبورد</h1>
+      <div class="header-actions">
+        <button id="search-btn" class="btn ghost">جستجو <kbd>Ctrl+K</kbd></button>
+        <button id="theme-btn" class="btn ghost">روشن / تیره</button>
+        <button id="refresh-btn" class="btn">تازه‌سازی</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <section id="section-overview" class="section">
+      <div class="strip" id="counter-strip">
+        <button class="counter" data-filter="all"><b id="c-all">—</b><span>همه جفت‌ها</span></button>
+        <button class="counter" data-filter="healthy"><b id="c-healthy">—</b><span>سالم</span></button>
+        <button class="counter" data-filter="stale"><b id="c-stale">—</b><span>هشدار / قدیمی</span></button>
+        <button class="counter" data-filter="down"><b id="c-down">—</b><span>قطع / دسترس‌ناپذیر</span></button>
+      </div>
+      <div class="kpis">
+        <div class="card kpi"><span class="kpi-label">سرورهای ثبت‌شده</span><b id="k-servers">—</b></div>
+        <div class="card kpi"><span class="kpi-label">جفت‌های فعال</span><b id="k-pairs">—</b></div>
+        <div class="card kpi"><span class="kpi-label">پروتکل جاری (آخرین جفت)</span><b id="k-proto" class="ltr">—</b></div>
+        <div class="card kpi"><span class="kpi-label">رویدادهای اخیر</span><b id="k-events">—</b></div>
+      </div>
+      <h2>جفت‌ها</h2>
+      <div id="pair-cards" class="cards"></div>
+      <p id="pairs-empty" class="muted" hidden>هنوز جفتی ساخته نشده است. از بخش جفت‌ها یکی بسازید.</p>
+    </section>
+
+    <section id="section-pairs" class="section" hidden>
+      <div class="section-head"><h2>جفت‌ها</h2><button class="btn" id="add-pair-btn">جفت تازه</button></div>
+      <div id="pair-table-wrap"></div>
+    </section>
+
+    <section id="section-servers" class="section" hidden>
+      <div class="section-head"><h2>سرورها</h2><button class="btn" id="add-server-btn">سرور تازه</button></div>
+      <div id="server-table-wrap"></div>
+    </section>
+
+    <section id="section-events" class="section" hidden>
+      <h2>رویدادها</h2>
+      <ol id="event-list" class="timeline"></ol>
+    </section>
+  </div>
+</div>
+
+<div id="palette" class="palette" hidden>
+  <div class="palette-box">
+    <input id="palette-input" placeholder="بخش یا کار را بنویسید… (داشبورد، جفت تازه، سرور تازه)">
+    <ul id="palette-list"></ul>
+  </div>
+</div>
+
+<dialog id="server-dialog">
+  <form method="dialog" id="server-form">
+    <h3>سرور تازه</h3>
+    <label>نام <input name="name" required></label>
+    <label>هاست / آی‌پی <input name="host" required class="ltr"></label>
+    <label>پورت SSH <input name="port" type="number" value="22"></label>
+    <label>کاربر SSH <input name="username" value="root" class="ltr"></label>
+    <label>مسیر کلید (روی هاست هاب) <input name="key_path" class="ltr"></label>
+    <label>یادداشت <input name="notes"></label>
+    <div class="dialog-actions"><button type="submit">ذخیره</button><button type="button" id="server-cancel">لغو</button></div>
+  </form>
+</dialog>
+
+<dialog id="pair-dialog">
+  <form method="dialog" id="pair-form">
+    <h3>جفت تازه</h3>
+    <label>نام <input name="name" required></label>
+    <label>سرور ایران <select name="iran_server_id" id="pair-iran"></select></label>
+    <label>سرور خارج <select name="foreign_server_id" id="pair-foreign"></select></label>
+    <label>سرور میزبان نگهبان <select name="healer_server_id" id="pair-healer"></select></label>
+    <label>پورت فرانت‌اند <input name="frontend_port" type="number" value="443"></label>
+    <div class="dialog-actions"><button type="submit">ذخیره</button><button type="button" id="pair-cancel">لغو</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
