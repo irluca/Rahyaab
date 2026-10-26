@@ -14,6 +14,14 @@ def test_unit_binds_localhost_only():
     assert "0.0.0.0" not in unit
 
 
+def test_public_unit_binds_all_with_tls():
+    unit = unit_file(host="0.0.0.0", tls_cert="/etc/rahyaab/tls/cert.pem",
+                     tls_key="/etc/rahyaab/tls/key.pem")
+    assert "--host 0.0.0.0 --port 8890" in unit
+    assert "--tls-cert /etc/rahyaab/tls/cert.pem" in unit
+    assert "--tls-key /etc/rahyaab/tls/key.pem" in unit
+
+
 def test_adoption_script_adopts_live_pair_and_compiles():
     script = adoption_script("94.184.23.90", "217.11.164.209")
     compile(script, "adopt.py", "exec")

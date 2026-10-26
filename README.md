@@ -28,12 +28,15 @@ panel — no configs, nodes or users, by any path.
 
 - Phase 1 (foundation) — DONE 2026-10-26: engine + agent ported,
   offline suite green: **158 passed, 13 subtests passed**.
-- Phase 2 (hub control plane) — DONE 2026-10-26: stdlib JSON API on
-  127.0.0.1:8890 (setup-once operator account, PBKDF2 + hashed session
-  tokens, fleet/pair CRUD, healer status/start/stop/restart over
+- Phase 2 (hub control plane) — DONE 2026-10-26: stdlib JSON API
+  (setup-once operator account, PBKDF2 + hashed session tokens,
+  fleet/pair CRUD, healer status/start/stop/restart over
   key-only SSH, background job queue, events). Offline test green
   (hub/test_hub.py), plus a live CLI smoke run (health, setup,
-  second-setup refused).
+  second-setup refused). Since the evening of 2026-10-26 the hub is
+  PUBLIC at https://94.184.23.90:8890 (self-signed cert, Secure
+  cookies, HSTS, login rate limiting) by the user's decision; before
+  that it was localhost-only via SSH forwarding.
 - Phase 3 (new dashboard) — DONE 2026-10-26: single-page app in
   dashboard/ (RTL, right sidebar, dark professional theme, Vazirmatn,
   counter strip with click-to-filter, pair cards with real SVG history

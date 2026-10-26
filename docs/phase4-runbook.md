@@ -37,9 +37,19 @@ first connect; compare it with `ssh-keygen -lf
 
 ## After install (user action)
 
-1. From your laptop: `ssh -L 8890:127.0.0.1:8890 root@94.184.23.90`
-2. Open http://127.0.0.1:8890/ and create the operator account
-   (setup form, shown only because no account exists yet).
+~~SSH forwarding~~ — superseded on the evening of 2026-10-26 by the
+user's decision to expose the panel publicly:
+
+1. Open https://94.184.23.90:8890/ directly and create the operator
+   account (setup form, shown only because no account exists yet).
+   Use a strong password: the panel is now on the public internet,
+   protected by login + rate limiting (10 failed logins per 5
+   minutes per address) + Secure cookies + HSTS.
+2. The certificate is self-signed (no domain for Let's Encrypt), so
+   the browser warns once — accept/advanced-proceed, and check the
+   fingerprint matches:
+   `SHA256 34:FC:B5:D6:43:A1:B2:0A:FE:77:3B:E8:DC:04:30:EC:92:4F:F1:7D:7D:91:59:FB:E1:BA:14:10:E7:EA:B7:9C`.
+   A domain certificate can replace it later.
 3. The adopted pair `manag-netlen` is already there: GRE, inner
    10.10.11.x, sweep candidate scores.
 

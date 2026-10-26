@@ -56,7 +56,12 @@ CANDIDATE_SCORES = {
     "wstunnel-v10": 78.03, "chisel-wss": 66.53, "hysteria2": 66.36,
 }
 
-UNIT_FILE = """[Unit]
+def unit_file(host: str = "127.0.0.1", tls_cert: str | None = None,
+              tls_key: str | None = None) -> str:
+    tls_args = ""
+    if tls_cert and tls_key:
+        tls_args = f" --tls-cert {tls_cert} --tls-key {tls_key}"
+    return f"""[Unit]
 Description=Rahyaab hub control plane
 After=network-online.target
 Wants=network-online.target
@@ -65,7 +70,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/rahyaab
-ExecStart=/usr/bin/python3 -m hub.main --host 127.0.0.1 --port 8890 --db /var/lib/rahyaab/hub.db
+ExecStart=/usr/bin/python3 -m hub.main --host {host} --port 8890 --db /var/lib/rahyaab/hub.db{tls_args}
 Restart=on-failure
 RestartSec=5
 
@@ -101,10 +106,6 @@ if "manag-netlen" not in pairs:
 else:
     print("manag-netlen already adopted")
 """
-
-
-def unit_file() -> str:
-    return UNIT_FILE
 
 
 def adoption_script(iran_host: str, foreign_host: str) -> str:
@@ -206,8 +207,14 @@ def preflight(remote: Remote) -> None:
     print("preflight ok: healer active, heartbeat present,", out.strip())
 
 
-def install(remote: Remote, iran_host: str, foreign_host: str) -> None:
-    preflight(remote)
+def _upload_code(remote: Remote) -> None:
+    """Upload the current hub + dashboard code to /opt/rahyaab.
+
+    Every step that changes the unit file must call this first: the
+    unit may reference flags that only the fresh code understands
+    (the first --expose-public run failed exactly this way — new unit,
+    old code, argparse error, restart loop).
+    """
     tarball = _tarball()
     try:
         remote.put(tarball, "/tmp/rahyaab.tar.gz")
@@ -215,6 +222,11 @@ def install(remote: Remote, iran_host: str, foreign_host: str) -> None:
         tarball.unlink(missing_ok=True)
     remote.exec("mkdir -p /opt/rahyaab /etc/rahyaab /var/lib/rahyaab "
                 "&& tar -xzf /tmp/rahyaab.tar.gz -C /opt/rahyaab && rm /tmp/rahyaab.tar.gz")
+
+
+def install(remote: Remote, iran_host: str, foreign_host: str) -> None:
+    preflight(remote)
+    _upload_code(remote)
     remote.put(HUB_KEY, "/etc/rahyaab/hub_key")
     remote.exec("chmod 600 /etc/rahyaab/hub_key")
     remote.put_text(unit_file(), "/tmp/rahyaab-hub.service")
@@ -245,6 +257,55 @@ def install(remote: Remote, iran_host: str, foreign_host: str) -> None:
     print("install complete: hub active, health ok, dashboard serves")
 
 
+def expose_public(remote: Remote, iran_host: str) -> dict:
+    """Switch an installed hub from localhost-only to public HTTPS.
+
+    Generates a self-signed certificate on the host (there is no
+    domain for Let's Encrypt; the browser will warn once until the
+    operator accepts it, and a domain cert can replace it later),
+    rewrites the unit to bind 0.0.0.0 with TLS, restarts the hub,
+    and opens 8890/tcp only if the host firewall actually drops it.
+    The healer, the tunnel and the hub database are untouched.
+    """
+    preflight(remote)
+    _upload_code(remote)
+    remote.exec("command -v openssl")
+    cert, key = "/etc/rahyaab/tls/cert.pem", "/etc/rahyaab/tls/key.pem"
+    remote.exec("mkdir -p /etc/rahyaab/tls")
+    rc, _, _ = remote.exec(f"test -f {cert} -a -f {key}", check=False)
+    if rc != 0:
+        remote.exec(
+            f"openssl req -x509 -newkey rsa:2048 -keyout {key} -out {cert} "
+            f"-days 825 -nodes -subj '/CN={iran_host}' "
+            f"-addext 'subjectAltName=IP:{iran_host}'")
+    remote.exec(f"chmod 600 {key} && chmod 644 {cert}")
+    remote.put_text(unit_file(host="0.0.0.0", tls_cert=cert, tls_key=key),
+                    "/tmp/rahyaab-hub.service")
+    remote.exec("mv /tmp/rahyaab-hub.service /etc/systemd/system/rahyaab-hub.service "
+                "&& chmod 644 /etc/systemd/system/rahyaab-hub.service "
+                "&& systemctl daemon-reload && systemctl restart rahyaab-hub")
+    import time
+    time.sleep(3)
+    rc, out, _ = remote.exec("systemctl is-active rahyaab-hub", check=False)
+    if out.strip() != "active":
+        raise RuntimeError("rahyaab-hub did not come back up after exposing")
+    remote.exec("curl -kfsS https://127.0.0.1:8890/api/health")
+    # Firewall: only add a rule when the firewall is actually closed.
+    firewall = "already open or no firewall tool"
+    rc, out, _ = remote.exec("command -v iptables", check=False)
+    if rc == 0:
+        rc, rules, _ = remote.exec("iptables -S INPUT", check=False)
+        if "8890" not in rules:
+            # -P INPUT is the first line, e.g. "-P INPUT DROP".
+            policy = rules.splitlines()[0] if rules else ""
+            if "DROP" in policy or "REJECT" in policy:
+                remote.exec("iptables -A INPUT -p tcp --dport 8890 -j ACCEPT")
+                firewall = "added iptables ACCEPT for 8890/tcp (policy was closed)"
+    rc, fp, _ = remote.exec(
+        f"openssl x509 -noout -fingerprint -sha256 -in {cert}", check=False)
+    return {"cert_fingerprint": fp.strip(), "firewall": firewall}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Install the Rahyaab hub (Phase 4)")
     parser.add_argument("--iran-host", default="94.184.23.90")
@@ -252,6 +313,8 @@ def main(argv=None) -> int:
     parser.add_argument("--hub-key", default=str(HUB_KEY))
     parser.add_argument("--check-only", action="store_true",
                         help="connect and preflight only, change nothing")
+    parser.add_argument("--expose-public", action="store_true",
+                        help="switch an installed hub to public HTTPS on 0.0.0.0:8890")
     args = parser.parse_args(argv)
     if not _valid_host(args.iran_host) or not _valid_host(args.foreign_host):
         parser.error("hosts must be plain hostnames or IPs")
@@ -264,6 +327,11 @@ def main(argv=None) -> int:
         if args.check_only:
             preflight(remote)
             print("check-only ok: key works, healer healthy, nothing changed")
+        elif args.expose_public:
+            info = expose_public(remote, args.iran_host)
+            print("public HTTPS on: https://%s:8890" % args.iran_host)
+            print("cert:", info["cert_fingerprint"])
+            print("firewall:", info["firewall"])
         else:
             install(remote, args.iran_host, args.foreign_host)
     finally:

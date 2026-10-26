@@ -62,6 +62,10 @@ class Hub:
     def __init__(self, store: Store, make_executor=None):
         self.store = store
         self.make_executor = make_executor
+        # Set by serve() when TLS is on. The session cookie is then
+        # Secure-only, and HSTS is advertised: once the panel is
+        # public, browsers must never send the cookie over plain HTTP.
+        self.tls_enabled = False
         self._login_failures: dict[str, list[float]] = {}
         self._failures_lock = threading.Lock()
         self.worker = Worker(store, make_executor=make_executor)
@@ -271,6 +275,9 @@ def make_handler(hub: Hub, static_dir=None):
             self.send_response(200)
             self.send_header("Content-Type", _STATIC_TYPES[target.suffix])
             self.send_header("Content-Length", str(len(body)))
+            if hub.tls_enabled:
+                self.send_header("Strict-Transport-Security",
+                                 "max-age=31536000")
             self.end_headers()
             self.wfile.write(body)
             return True
@@ -282,14 +289,18 @@ def make_handler(hub: Hub, static_dir=None):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if hub.tls_enabled:
+                self.send_header("Strict-Transport-Security",
+                                 "max-age=31536000")
+            secure = "; Secure" if hub.tls_enabled else ""
             if set_cookie:
                 self.send_header("Set-Cookie",
-                                 "%s=%s; HttpOnly; SameSite=Lax; Path=/api/" % (
-                                     SESSION_COOKIE, set_cookie))
+                                 "%s=%s; HttpOnly; SameSite=Lax; Path=/api/%s" % (
+                                     SESSION_COOKIE, set_cookie, secure))
             if clear_cookie:
                 self.send_header("Set-Cookie",
-                                 "%s=; HttpOnly; SameSite=Lax; Path=/api/; Max-Age=0"
-                                 % SESSION_COOKIE)
+                                 "%s=; HttpOnly; SameSite=Lax; Path=/api/; Max-Age=0%s"
+                                 % (SESSION_COOKIE, secure))
             self.end_headers()
             self.wfile.write(body)
 
@@ -412,12 +423,19 @@ def make_handler(hub: Hub, static_dir=None):
 
 
 def serve(store: Store, host: str = "127.0.0.1", port: int = 8890,
-          make_executor=None, static_dir=None) -> ThreadingHTTPServer:
+          make_executor=None, static_dir=None,
+          tls_cert: str | None = None, tls_key: str | None = None) -> ThreadingHTTPServer:
     hub = Hub(store, make_executor=make_executor)
     if static_dir is None:
         from pathlib import Path
         candidate = Path(__file__).resolve().parent.parent / "dashboard"
         static_dir = str(candidate) if candidate.is_dir() else None
     server = ThreadingHTTPServer((host, port), make_handler(hub, static_dir))
+    if tls_cert and tls_key:
+        import ssl
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tls_cert, tls_key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        hub.tls_enabled = True
     server.hub = hub  # type: ignore[attr-defined]
     return server
