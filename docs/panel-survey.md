@@ -237,7 +237,36 @@ Guardrails for every install:
   in the same window; managed servers as a form, not a shell line; terminal
   as an audited, deliberate action.
 
-## SYNTHESIS — DRAFT (wg-easy still pending)
+## wg-easy (wg-easy/wg-easy, Docker) — LIVE FINDINGS (2026-10-26 evening)
+- Panel fully explored: Vue SPA on :18099 (Iran, container), WireGuard
+  server wg0 on :51822 (UDP) inside the container, client
+  "survey-foreign" created via API (address 10.8.0.2, QR/config
+  endpoint, transfer counters, handshake timestamps, apexcharts
+  graphs). API surface: POST /api/session {password = sha256 hex},
+  GET/POST /api/wireguard/client, GET .../client/{id}/configuration.
+- v14 gotchas, each found the hard way: PASSWORD is a fatal error —
+  only PASSWORD_HASH works; and PASSWORD_HASH must be bcrypt of the
+  SHA256 hex of the password (the UI sends sha256, the server
+  bcrypt-compares that hex), NOT bcrypt of the password itself.
+  A second trap: WG_PORT is the port inside the container, so the
+  Docker mapping must be 51822:51822, not 51822:51820.
+- DATA PATH DID NOT COMPLETE on this pair — and the evidence says it
+  is the path, not wg-easy: the foreign client's handshake packets
+  never arrived at the Iran host (0 packets on eth0/tcpdump across
+  many attempts, container transfer 0/0, no handshake), while plain
+  UDP from the same foreign host to the same Iran host arrived 3/3
+  and 4/4 in the same minutes, including right after wg bursts.
+  Practical conclusion: on this Iran<->foreign path right now,
+  WireGuard UDP handshakes do not get through while generic UDP does
+  — a WireGuard-only panel is not a reliable link here, which is
+  exactly why a multi-protocol healer (GRE/ESP/TCP fallbacks) matters.
+- Design notes: client cards with avatar, per-client transfer Rx/Tx,
+  latest-handshake timestamps, one-click config download + QR, traffic
+  graphs per client. The host cannot reach the wg subnet directly:
+  wg0 lives inside the container netns, so tests must run from inside
+  the container (docker exec), not from the host.
+
+## SYNTHESIS — FINAL (2026-10-26 night; all panels explored)
 What each panel is best at:
 - BackPack: best live-ops panel — live strip + fleet cards, trouble-first
   overview, audited in-page terminal, managed servers as a form.
@@ -259,13 +288,26 @@ Ideas to apply to the Rahyaab dashboard (in priority order):
    collects latency/throughput; add carrier-iface byte counters per
    pair and daily rollups from healer_history.
 2. Trouble-first ordering (BackPack): pairs with problems sort to the
-   top of the tunnel list, healthy ones below.
+   top of the tunnel list, healthy ones below. DONE — deployed to the
+   live hub 2026-10-26 night.
 3. Stepwise job display with the REAL error (Kariz ops pattern, minus
    its generic-error flaw): Rahyaab jobs already exist — show their
    step list and last error verbatim in the UI.
 4. Compact per-server live strip above the cards (BackPack strip):
-   CPU/mem/disk/uptime per server in one line each.
+   CPU/mem/disk/uptime per server in one line each. DONE — deployed
+   to the live hub 2026-10-26 night.
 5. Keep the standing rules: empty sections deleted, never faked; a dash
    means not-reported, never zero; charts draw only from healer_history.
 6. Future, not now: an NPS-style one-time-key agent registration for
    multi-server fleets, and Smite-style per-pair quota fields.
+7. wg-easy lesson for Rahyaab's engine (not the dashboard): a
+   WireGuard-only link is not reliable on this Iran<->foreign path
+   right now — keep the multi-protocol healer with TCP/GRE/ESP
+   fallbacks as the core design.
+8. Cleanup (2026-10-26 night): all survey services, containers,
+   units, configs and test listeners removed from both servers;
+   production verified afterwards (healer active, hub active,
+   GRE 0% loss ~38 ms, hub dashboard 200 from the foreign host).
+   Left untouched: healer, rahyaab-hub, GRE/ESP units, PasarGuard,
+   and the pre-existing /usr/local/bin/frpc+frps binaries (dated
+   Aug 14, before this survey, inert, no listeners).
