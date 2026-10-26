@@ -87,7 +87,9 @@ async function loadPairHistory(pair) {
 }
 
 function renderPairs() {
-  const list = state.pairs.filter(p => state.filter === "all" || pairState(p) === state.filter);
+  const rank = { down: 0, stale: 1, healthy: 2 };
+  const list = state.pairs.filter(p => state.filter === "all" || pairState(p) === state.filter)
+    .sort((a, b) => rank[pairState(a)] - rank[pairState(b)]);
   $("#pair-cards").innerHTML = list.map(p => {
     const st = pairState(p), [label, cls] = badgeFor(st);
     const hist = histories[p.id] || [];
@@ -140,6 +142,22 @@ function renderPairs() {
       showBanner("دستور ری‌استارت نگهبان فرستاده شد.");
     };
   });
+}
+
+function renderServerStrip() {
+  $("#server-strip").innerHTML = state.servers.map(s => {
+    const m = (serverMetrics[s.id] || []).slice(-1)[0];
+    const fresh = metricFresh(m);
+    const dot = fresh === "fresh" ? "mini-dot" : fresh === "stale" ? "mini-dot stale" : "mini-dot unknown";
+    if (!m) return `<div class="server-strip-item"><span class="${dot}"></span><b>${s.name}</b>`
+      + `<span class="host ltr">${s.host}</span><span class="muted">هنوز متریکی ثبت نشده است.</span></div>`;
+    return `<div class="server-strip-item"><span class="${dot}"></span><b>${s.name}</b>`
+      + `<span class="host ltr">${s.host}</span>`
+      + `<span>بار CPU <b class="ltr">${m.load1 ?? "—"}</b></span>`
+      + `<span>حافظه <b>${m.mem_used_pct ?? "—"}٪</b></span>`
+      + `<span>دیسک <b>${m.disk_used_pct ?? "—"}٪</b></span>`
+      + `<span>آپتایم <b>${fmtUptime(m.uptime_seconds)}</b></span></div>`;
+  }).join("");
 }
 
 function renderTables() {
@@ -227,7 +245,7 @@ async function loadAll() {
         catch { pairMetrics[pr.id] = []; }
       }),
     ]);
-    renderCounters(); renderPairs(); renderTables();
+    renderCounters(); renderServerStrip(); renderPairs(); renderTables();
     $("#conn-dot").className = "dot ok"; $("#conn-text").textContent = "متصل به هاب";
   } catch (e) {
     if (e.status === 401) { showAuth(); return; }

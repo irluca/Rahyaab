@@ -66,6 +66,15 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 
+/* Compact per-server live strip (BackPack-style): one line per server,
+   reusing the metrics the server cards already fetch. */
+.server-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.server-strip:empty { display: none; }
+.server-strip-item { background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 8px 12px; font-size: 13px;
+  display: flex; gap: 12px; align-items: center; }
+.server-strip-item .host { color: var(--muted); direction: ltr; }
+
 /* Smite-style stat cards: colored icon chip, big bold value, and a
    4px accent bar along the bottom of the card. */
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 16px; }
