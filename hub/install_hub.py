@@ -40,6 +40,7 @@ import re
 import sys
 import tarfile
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -136,10 +137,19 @@ class Remote:
         if os.path.exists(known):
             self._client.load_host_keys(known)
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # This VM's direct outbound TCP is reset by the egress proxy;
+        # SSH must go through it via socat HTTP-CONNECT, exactly like
+        # the proven connect_new.py pattern.
+        sock = None
+        if os.environ.get("https_proxy"):
+            u = urllib.parse.urlparse(os.environ["https_proxy"])
+            sock = paramiko.ProxyCommand(
+                f"socat - PROXY:{u.hostname}:{self.host}:22,"
+                f"proxyport={u.port},proxyauth={u.username}:{u.password}")
         self._client.connect(self.host, port=22, username="root",
                              key_filename=str(self.key_path), timeout=20,
                              banner_timeout=30, auth_timeout=30,
-                             allow_agent=False, look_for_keys=False)
+                             allow_agent=False, look_for_keys=False, sock=sock)
         key = self._client.get_transport().get_remote_server_key()
         print(f"host key {self.host}: {key.get_name()} "
               f"SHA256:{key.get_base64()[:43]} (verify against the server's "

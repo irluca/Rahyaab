@@ -43,10 +43,14 @@ panel — no configs, nodes or users, by any path.
   Tests green (hub/test_hub.py + hub/test_dashboard.py), JS syntax
   checked, CLI smoke run served the page.
 - Phase 4 (live install on the two servers + live tests via the hub)
-  — installer ready (`hub/install_hub.py`, `--check-only` first,
-  runbook in `docs/phase4-runbook.md`); BLOCKED on the user
-  authorizing the hub public key on both servers. Hub deploy keypair
-  at .hub-key/ (private key git-ignored, never pushed).
+  — DONE 2026-10-26 evening: hub installed on the Iran host
+  (`rahyaab-hub`, 127.0.0.1:8890), pair manag-netlen adopted (GRE,
+  10.10.11.x, sweep scores), live tests through the hub API all
+  passed (healer healthy, healer_status + connectivity jobs, history
+  points, healer restart and recovery with a new pid). The throwaway
+  test operator was deleted afterwards; the hub is setup-pending for
+  the real operator. GRE still serving (0% loss, ~37 ms) and the
+  foreign :443 listener untouched throughout.
 - Phase 5 (private GitHub repo push + tag + final report) — pending
   push: local repo committed (`b300f50`, branch `main`, hub key
   verified absent) and runbook in `docs/phase5-runbook.md`; push
