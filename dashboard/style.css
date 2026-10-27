@@ -39,6 +39,7 @@ body { margin: 0; background: var(--bg); color: var(--text);
   font-family: "Vazirmatn", Tahoma, "Segoe UI", sans-serif; font-size: 15px; }
 body::before { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background:
+    radial-gradient(700px 320px at 50% -90px, #4ea8ff24, transparent 70%),
     radial-gradient(640px 320px at 85% -5%, #4ea8ff22, transparent 60%),
     radial-gradient(720px 380px at 8% 108%, #a78bfa1f, transparent 60%),
     radial-gradient(520px 260px at 50% -10%, #2dd4bf14, transparent 60%); }
@@ -94,7 +95,7 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .counter b { display: block; font-size: 23px; font-weight: 800; }
 .counter span { color: var(--muted); font-size: 12px; }
 .card { background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow); }
+  border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-lg); }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
 /* Pair cards always stack full-width: their content is horizontal now. */
 #pair-cards.cards { grid-template-columns: 1fr; }
@@ -178,7 +179,7 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .badge.down { background: #ff5c6c22; color: var(--red); }
 .tunnel-box .meta { color: var(--muted); font-size: 13px; margin: 8px 0 2px; }
 .servers-mini { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
-.server-mini { background: var(--well); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; }
+.server-mini { background: var(--well); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; box-shadow: var(--shadow-sm); }
 .server-mini-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .server-mini-head b { font-size: 15px; }
 .server-mini-head .host { color: var(--muted); font-size: 12px; margin-inline-start: auto; }
@@ -217,13 +218,13 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
    the new protocol by itself. Rejected protocols are dimmed, dashed,
    and have no key at all. */
 .score-wrap { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
-.proto-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-.proto-chip { display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+.proto-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; align-items: stretch; }
+.proto-chip { flex: 1 1 210px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
   background: var(--well); border: 1px solid var(--line); border-radius: 14px;
-  padding: 8px 12px 9px; font-size: 12px; color: var(--text); }
+  padding: 8px 12px 9px; font-size: 12px; color: var(--text); box-shadow: var(--shadow-sm); }
 .proto-chip b { font-weight: 800; }
-.proto-chip.on { border-color: #3ddc8455; }
-.proto-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 800; }
+.proto-chip.on { border-color: #3ddc8455; box-shadow: var(--shadow-sm), 0 0 18px #3ddc8422; }
+.proto-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 800; flex-wrap: wrap; justify-content: center; }
 .proto-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
 .proto-chip.on .proto-dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .proto-dot.pulse { animation: pulse 2s infinite; }
@@ -236,7 +237,7 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .switch-btn { margin-top: 3px; font: inherit; font-size: 11px; font-weight: 800;
   color: var(--accent); background: transparent; border: 1px solid var(--accent);
   border-radius: 999px; padding: 3px 14px; cursor: pointer; transition: all .15s; }
-.switch-btn:hover { background: var(--accent); color: #081120; }
+.switch-btn:hover { background: var(--accent); color: #081120; box-shadow: 0 4px 14px #4ea8ff55; }
 [data-theme="light"] .switch-btn:hover { color: #fff; }
 .switch-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .state-pill { margin-top: 3px; font-size: 11px; font-weight: 800;
