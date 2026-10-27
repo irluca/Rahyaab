@@ -31,7 +31,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 # پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -271,15 +271,20 @@ EOF
 }
 
 hub_health() { # $1 = http|https
-    local scheme="$1" out=""
-    sleep 3
+    local scheme="$1" out="" i=0
     systemctl is-active "$UNIT" | grep -qx "active" \
         || die "سرویس $UNIT بالا نیامد؛ با 'journalctl -u $UNIT -n 50' لاگ را ببینید"
-    if [ "$scheme" = "https" ]; then
-        out="$(curl -kfsS "https://127.0.0.1:$HUB_PORT/api/health" 2>/dev/null || true)"
-    else
-        out="$(curl -fsS "http://127.0.0.1:$HUB_PORT/api/health" 2>/dev/null || true)"
-    fi
+    # هاب روی VPS کند ممکن است چند ثانیه دیرتر گوش بدهد؛ تا ۳۰ ثانیه تلاش کن
+    while [ "$i" -lt 15 ]; do
+        if [ "$scheme" = "https" ]; then
+            out="$(curl -kfsS "https://127.0.0.1:$HUB_PORT/api/health" 2>/dev/null || true)"
+        else
+            out="$(curl -fsS "http://127.0.0.1:$HUB_PORT/api/health" 2>/dev/null || true)"
+        fi
+        [ -n "$out" ] && break
+        sleep 2
+        i=$((i + 1))
+    done
     [ -n "$out" ] || die "هاب بالا آمده ولی /api/health جواب نداد"
     info "سلامت هاب: $out"
 }
@@ -321,7 +326,10 @@ install_hub() {
     install_deps hub
     fetch_code
     write_hub_unit "127.0.0.1" "" ""
-    systemctl enable --now "$UNIT"
+    systemctl enable "$UNIT" >/dev/null 2>&1
+    # نکته: enable --now یونیتِ در حال اجرا را ری‌استارت نمی‌کند؛ برای نصب دوباره
+    # حتماً restart لازم است تا کد و تنظیمات تازه واقعاً بالا بیایند
+    systemctl restart "$UNIT"
     hub_health http
     firewall_open_8890
     ok "هاب نصب شد؛ فعلاً فقط روی خود سرور (127.0.0.1) در دسترس است"
