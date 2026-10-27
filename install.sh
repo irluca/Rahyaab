@@ -31,7 +31,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 # پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -227,7 +227,7 @@ fetch_code() {
     else
         local url="https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}"
         local auth_args=()
-        if [ -n "$GITHUB_TOKEN" ]; then
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
             auth_args=(-H "Authorization: Bearer $GITHUB_TOKEN")
         fi
         info "دانلود از $url"
