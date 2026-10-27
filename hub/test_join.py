@@ -171,6 +171,14 @@ def test_generate_token_file_mode(tmp_path):
     assert join.read_token(path) == token
 
 
+def test_generate_cli_prints_and_writes_token(tmp_path, capsys):
+    path = str(tmp_path / "join.token")
+    assert join.main(["generate", "--path", path]) == 0
+    out = capsys.readouterr().out.strip()
+    assert len(out) == 32 and all(c in "0123456789abcdef" for c in out)
+    assert join.read_token(path) == out
+
+
 def test_full_setup_handler_calls_wizard_chain(tmp_path, monkeypatch):
     store = Store(str(tmp_path / "hub.db"))
     master = register_self(str(tmp_path / "hub.db"), "203.0.113.10")

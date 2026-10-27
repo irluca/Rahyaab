@@ -51,19 +51,27 @@ Rahyaab is a server-side tunnel control plane, derived from Tunnel Studio Pro. T
 # 1. Download the installer (fails loudly if the download fails)
 curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh
 
-# 2. Run it — interactive menu (install hub or node, BBR, panel certificate, update, status, uninstall)
+# 2. Run it — it first asks: master or node?
 bash /tmp/install-rahyaab.sh
 ```
+
+**Join flow — the recommended way (Kariz/Smite-style, no IP typing).**
+
+1. On the master server, run the installer and pick **master**. It installs the hub, enables BBR, issues the panel certificate, registers itself, and prints a one-line join command.
+2. Paste that one line on the node server. The node installs itself, verifies the master's certificate fingerprint (carried in the command), and joins. The master then builds the pair, deploys the first tunnel (GRE) and installs the healer in the background.
+
+The join code is single-use: printing a new one invalidates the old one. If a pair is already set up, joining never redeploys it on its own.
 
 Non-interactive:
 
 ```bash
+bash /tmp/install-rahyaab.sh --role master --bbr --ip-cert --yes                                  # master + BBR + self-signed IP cert (auto-renewed) + join command
 bash /tmp/install-rahyaab.sh --role hub --bbr --ip-cert --yes                                    # hub + BBR + self-signed IP cert (auto-renewed)
 bash /tmp/install-rahyaab.sh --role hub --bbr --domain panel.example.com --email you@example.com --yes  # hub + Let's Encrypt
 bash /tmp/install-rahyaab.sh --role node --bbr --yes                                              # node (no dashboard)
 ```
 
-**Full setup — two raw servers, one command, no Muse needed.** On the hub server, as root:
+**Full setup — master-driven alternative (two raw servers, one command, no Muse needed).** On the hub server, as root:
 
 ```bash
 bash /tmp/install-rahyaab.sh --full-setup <node-host> --bbr --ip-cert --yes
@@ -71,7 +79,7 @@ bash /tmp/install-rahyaab.sh --full-setup <node-host> --bbr --ip-cert --yes
 
 This installs the hub, enables BBR, issues the panel certificate, installs the hub key on the node (the node's root password is asked once and never stored), installs the node remotely, registers the pair, measures and deploys the first tunnel (GRE), and installs the healer on top of it. After it finishes, open the dashboard and create the operator account — that step stays in the dashboard, and the installer never creates accounts or touches PasarGuard.
 
-Then open **https://YOUR-SERVER-IP:8890**, create the operator account (setup form, shown only because no account exists yet), add servers, run a benchmark, create a pair, and enable the healer. Re-running the installer is safe: the database and existing certificates are never overwritten.
+Then open **https://YOUR-SERVER-IP:8890**, create the operator account (setup form, shown only because no account exists yet), and watch the pair come up (GRE + healer) — with the join flow there are no manual pair/benchmark steps. Re-running the installer is safe: the database and existing certificates are never overwritten.
 
 **Notes:** Let's Encrypt does not issue certificates for bare IPs, so the IP path is self-signed (the browser warns once; the fingerprint is printed by the installer for comparison) with a daily timer that renews it before expiry. A private fork needs `GITHUB_TOKEN` (a read-only fine-grained PAT) for the download path, or `--local` with an uploaded copy of the code.
 

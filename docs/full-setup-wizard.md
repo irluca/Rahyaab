@@ -5,7 +5,43 @@ dashboard together install and do everything, with no Muse needed.
 The only trust bootstrap is one shared step, and it is honest: two
 servers that have never met cannot trust each other out of nothing.
 
-## One command (install.sh 1.3.0)
+## Join flow — the primary UX (install.sh 1.4.0)
+
+The user rejected typing the node IP into the script ("این خیلی بده
+که") and asked for the Kariz/Smite way: the script first asks
+"node or master?", and the node connects to the master. That is now
+the primary flow; full-setup below stays as the master-driven
+alternative.
+
+1. Master: `bash install.sh` → pick **master**. Installs the hub,
+   enables BBR, issues the panel certificate, self-registers
+   (`hub.wizard --self-host`), and prints a one-line join command
+   carrying a fresh single-use token + the panel certificate's
+   SHA256 fingerprint. Re-printing (menu item 11 / `--print-join`)
+   generates a fresh token and invalidates the old one.
+2. Node: paste that one line. It installs the node role, enables
+   BBR, fetches the master's certificate, verifies it against the
+   fingerprint from the command, then POSTs to `/api/join` using the
+   verified certificate as its CA (not curl -k on an unverified
+   channel), sending the token + its own SSH host key. The hub
+   validates the token (constant-time compare, deleted after one
+   successful join), creates the node record with the request's
+   source IP (auto-detected, never typed), pins the node's host key
+   (stale lines for that host dropped first), returns the hub
+   public key for the node to authorise, creates the first pair
+   (master = iran, node = foreign) and enqueues a `full_setup` job
+   that runs the wizard chain in the background.
+3. A pair that already has a current protocol gets no new job:
+   joining never redeploys a live pair on its own. Node-rebuild
+   recovery is: delete the pair in the dashboard, print a fresh join
+   command, re-join.
+
+The join endpoint is unauthenticated by design (the token is the
+credential), placed before the session check in `_route`, like
+`/api/setup`. A missing master record, a missing hub public key, or
+a bad token fails with a clear error and creates nothing.
+
+## One command (install.sh 1.3.0) — master-driven alternative
 
 On the hub server, as root:
 

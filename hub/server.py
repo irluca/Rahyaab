@@ -5,6 +5,7 @@ first-time setup):
     GET  /api/health
     POST /api/setup            {username, password} — only when no user exists
     POST /api/login            {username, password} -> session cookie
+    POST /api/join             {token, host_key_type, host_key_b64} -> node record + hub pubkey (token-gated, no login)
     POST /api/logout
     GET  /api/servers          POST /api/servers
     GET  /api/servers/{id}     DELETE /api/servers/{id}

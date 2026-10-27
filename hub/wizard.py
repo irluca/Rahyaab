@@ -107,8 +107,10 @@ def register_pair(db_path: str, iran_host: str, foreign_host: str,
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Rahyaab setup wizard: register pair")
     parser.add_argument("--db", default="/var/lib/rahyaab/hub.db")
-    parser.add_argument("--iran-host", required=True)
-    parser.add_argument("--foreign-host", required=True)
+    parser.add_argument("--iran-host", default=None)
+    parser.add_argument("--foreign-host", default=None)
+    parser.add_argument("--self-host", default=None,
+                        help="register this hub host itself as a server and exit")
     parser.add_argument("--pair-name", default="جفت اصلی")
     parser.add_argument("--iran-name", default="ایران")
     parser.add_argument("--foreign-name", default="خارج")
@@ -116,6 +118,12 @@ def main(argv=None) -> int:
     parser.add_argument("--inner-foreign", default=None)
     parser.add_argument("--frontend-port", type=int, default=443)
     args = parser.parse_args(argv)
+    if args.self_host:
+        server = register_self(args.db, args.self_host)
+        print(json.dumps(server, ensure_ascii=False))
+        return 0
+    if not args.iran_host or not args.foreign_host:
+        parser.error("--iran-host and --foreign-host are required")
     pair = register_pair(
         args.db, args.iran_host, args.foreign_host,
         pair_name=args.pair_name, iran_name=args.iran_name,

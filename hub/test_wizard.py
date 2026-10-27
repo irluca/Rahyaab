@@ -50,3 +50,16 @@ def test_measurement_update_records_only_measured(tmp_path):
     updated = store.get_pair(pair["id"])
     assert updated["candidate_scores"] == {"GRE": 99.9}
     assert updated["current_protocol"] == "GRE"
+
+
+def test_register_self_cli_is_idempotent_and_updates_host(tmp_path, capsys):
+    import json
+    from hub.wizard import main
+    db = str(tmp_path / "hub.db")
+    assert main(["--db", db, "--self-host", "203.0.113.10"]) == 0
+    first = json.loads(capsys.readouterr().out.strip())
+    assert main(["--db", db, "--self-host", "203.0.113.99"]) == 0
+    second = json.loads(capsys.readouterr().out.strip())
+    assert first["id"] == second["id"]
+    assert second["host"] == "203.0.113.99"
+    assert second["name"] == "ایران"

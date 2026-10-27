@@ -204,3 +204,19 @@ def join_node(store, body: dict, source_ip: str,
     except OSError:
         pass
     return {"server": node, "pair": pair, "job": job, "hub_pubkey": hub_pubkey}
+
+
+def main(argv=None) -> int:
+    """CLI for install.sh: `python3 -m hub.join generate` prints a token."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Rahyaab node join token")
+    parser.add_argument("command", choices=["generate"])
+    parser.add_argument("--path", default=None)
+    args = parser.parse_args(argv)
+    if args.command == "generate":
+        print(generate_token(args.path))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

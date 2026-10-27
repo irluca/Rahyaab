@@ -34,7 +34,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 # پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -56,6 +56,10 @@ LOCAL_SRC=""
 NODE_HOST=""
 REMOTE_NODE=""
 FULL_SETUP_NODE=""
+JOIN_HOST=""
+JOIN_TOKEN=""
+JOIN_FP=""
+PRINT_JOIN=0
 IRAN_HOST=""
 PAIR_NAME="جفت اصلی"
 PROTOCOL="GRE"
@@ -123,9 +127,12 @@ public_ip() {
 usage() {
     cat <<EOF
 استفاده:
-  bash install.sh                     منوی تعاملی
-  bash install.sh --role hub          نصب غیرتعاملی هاب
-  bash install.sh --role node         نصب غیرتعاملی نود
+  bash install.sh                     منوی تعاملی (اول می‌پرسد: مستر یا نود؟)
+  bash install.sh --role master       نصب غیرتعاملی مستر (هاب + ثبت مستر + دستور اتصال)
+  bash install.sh --role hub          نصب غیرتعاملی هاب (بدون ثبت مستر)
+  bash install.sh --role node         نصب غیرتعاملی نود (بدون اتصال)
+  bash install.sh --join HOST TOKEN FINGERPRINT   اتصال نود به مستر با دستور اتصال (پیست یک خط از مستر)
+  bash install.sh --print-join        نمایش دستور اتصال نود (روی مستر؛ کد یک‌بارمصرف تازه می‌سازد)
   bash install.sh --role hub --bbr --domain panel.example.com --email you@example.com
   bash install.sh --role hub --bbr --ip-cert
   bash install.sh --local /path/to/rahyaab --role hub
@@ -141,7 +148,10 @@ usage() {
 نصبش کنید. پسورد فقط برای همان یک اتصال است و بعد دور انداخته می‌شود.
 
 گزینه‌ها:
-  --role hub|node     نقش این سرور (هاب = داشبورد، نود = بدون داشبورد)
+  --role hub|node|master   نقش این سرور (هاب = داشبورد، نود = بدون داشبورد،
+                           مستر = هاب + ثبت خودکار مستر + چاپ دستور اتصال نود)
+  --join HOST TOKEN FINGERPRINT   اتصال این نود به مستر (سه تکه دستور اتصال)
+  --print-join        نمایش دستور اتصال نود (فقط روی مستر)
   --push-key HOST     نصب کلید هاب روی نود با پسورد یک‌باره روت آن
   --remote-node HOST  نصب نود روی سرور دیگر از همین سرور هاب (پیش‌نیاز: push-key)
   --full-setup HOST   راه‌اندازی کامل دو سرور (هاب + نود + جفت + تانل اول + نگهبان)
@@ -169,6 +179,8 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --role)     ROLE="$2"; shift 2 ;;
+            --join)     JOIN_HOST="$2"; JOIN_TOKEN="$3"; JOIN_FP="$4"; shift 4 ;;
+            --print-join) PRINT_JOIN=1; shift ;;
             --push-key) NODE_HOST="$2"; shift 2 ;;
             --remote-node) REMOTE_NODE="$2"; shift 2 ;;
             --full-setup) FULL_SETUP_NODE="$2"; shift 2 ;;
@@ -194,7 +206,7 @@ parse_args() {
             *)          die "گزینه ناشناخته: $1 (با --help راهنما را ببینید)" ;;
         esac
     done
-    case "$ROLE" in ""|hub|node) ;; *) die "نقش نامعتبر: $ROLE (hub یا node)" ;; esac
+    case "$ROLE" in ""|hub|node|master) ;; *) die "نقش نامعتبر: $ROLE (hub، node یا master)" ;; esac
     if [ -n "$DOMAIN" ] && [ -z "$EMAIL" ]; then
         die "برای گواهی دامنه، --email هم لازم است"
     fi
@@ -598,6 +610,151 @@ install_node() {
     info "خودش هیچ سرویسی گوش نمی‌دهد و حساب اپراتوری هم اینجا ساخته نمی‌شود."
 }
 
+# ── جریان اتصال نود (join) ─────────────────────────────────────
+# روش کاریز/اسمیت: مستر یک دستور یک‌خطی می‌دهد، نود آن را پیست می‌کند.
+# هیچ آی‌پی‌ای تایپ نمی‌شود: آدرس نود از مبدا درخواست خوانده می‌شود و
+# آدرس مستر هم از همان گواهی‌اش می‌آید. اعتماد به کانال هم کور نیست:
+# اثر انگشت گواهی مستر در خود دستور اتصال است و نود پیش از فرستادن کد،
+# گواهی دریافتی را با همان اثر انگشت می‌سنجد، بعد همان گواهیِ تاییدشده
+# را به‌عنوان CA برای درخواست اتصال استفاده می‌کند.
+norm_fp() { # $1=fingerprint -> 64 کاراکتر هگز بزرگ، بدون جداکننده
+    echo "$1" | tr -d ' :\t' | sed 's/^SHA256Fingerprint=//I' | tr 'a-f' 'A-F'
+}
+
+active_hub_cert() { # مسیر گواهی فعلی هاب از روی یونیت، یا خالی
+    systemctl cat "$UNIT" 2>/dev/null | grep -o -- '--tls-cert [^ ]*' | awk '{print $2}' | head -1
+}
+
+print_join_command() {
+    [ -f "$INSTALL_DIR/hub/main.py" ] || die "هاب روی این سرور نصب نیست"
+    [ -f "$HUB_PUB" ] || die "کلید هاب نیست؛ اول هاب را نصب کنید"
+    local cert host token fp
+    cert="$(active_hub_cert)"
+    [ -n "$cert" ] || die "هاب هنوز گواهی ندارد (فقط لوکال است)؛ اول از منو «گواهی پنل» را اجرا کنید، بعد دوباره دستور اتصال را بگیرید"
+    case "$cert" in
+        /etc/letsencrypt/live/*/fullchain.pem)
+            host="$(echo "$cert" | cut -d/ -f5)" ;;
+        *) host="$(public_ip)" ;;
+    esac
+    [ -n "$host" ] && [ "$host" != "نامشخص" ] || die "آدرس مستر پیدا نشد"
+    token="$(cd "$INSTALL_DIR" && python3 -m hub.join generate)" || die "ساخت کد اتصال ناموفق بود"
+    fp="$(norm_fp "$(cert_fingerprint "$cert")")"
+    echo
+    echo "دستور اتصال نود — این یک خط را روی سرور نود پیست کنید:"
+    echo "curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh && bash /tmp/install-rahyaab.sh --join $host $token $fp"
+    echo
+    warn "این کد فقط یک بار مصرف می‌شود؛ با چاپ دوباره، کد قبلی می‌سوزد"
+}
+
+verify_master_cert() { # $1=host $2=expected-fp (نرمال‌شده)
+    local host="$1" expected="$2" cert_pem="/tmp/rahyaab-master-cert.pem" actual
+    echo | openssl s_client -connect "$host:$HUB_PORT" -servername "$host" 2>/dev/null \
+        | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$cert_pem"
+    [ -s "$cert_pem" ] || die "ارتباط امن با مستر برقرار نشد ($host:$HUB_PORT)"
+    actual="$(norm_fp "$(cert_fingerprint "$cert_pem")")"
+    [ "$actual" = "$expected" ] || die "اثر انگشت گواهی مستر با دستور اتصال نمی‌خواند؛ دستور تازه از مستر بگیرید (شاید گواهی عوض شده باشد، یا کسی وسط راه باشد)"
+    ok "گواهی مستر راستی‌آزمایی شد"
+}
+
+node_join() { # $1=host $2=token $3=fingerprint
+    local host="$1" token="$2" fp
+    fp="$(norm_fp "$3")"
+    [ -n "$host" ] || die "آدرس مستر لازم است"
+    [[ "$token" =~ ^[0-9a-f]{32}$ ]] || die "کد اتصال نامعتبر است (باید ۳۲ کاراکتر هگز باشد)"
+    [[ "$fp" =~ ^[0-9A-F]{64}$ ]] || die "اثر انگشت نامعتبر است (باید ۶۴ کاراکتر هگز باشد)"
+    step "نصب نود و اتصال به مستر $host"
+    install_deps node
+    fetch_code
+    enable_bbr
+    verify_master_cert "$host" "$fp"
+    local key_file ktype kb64
+    key_file=""
+    for k in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
+        if [ -f "$k" ]; then key_file="$k"; break; fi
+    done
+    [ -n "$key_file" ] || die "کلید هاست SSH روی این سرور نیست (sshd نصب نیست؟)؛ اول openssh-server را نصب کنید"
+    read -r ktype kb64 _ < "$key_file"
+    local json resp code body err hub_pub
+    json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" python3 -c 'import json,os; print(json.dumps({"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"]}))')"
+    resp="$(curl -sS --max-time 30 --cacert /tmp/rahyaab-master-cert.pem -X POST "https://$host:$HUB_PORT/api/join" -H 'Content-Type: application/json' --data "$json" -w $'\n%{http_code}')" \
+        || die "ارتباط با مستر برقرار نشد ($host:$HUB_PORT)"
+    code="${resp##*$'\n'}"
+    body="${resp%$'\n'*}"
+    if [ "$code" != "201" ]; then
+        err="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",""))' 2>/dev/null || echo "$body")"
+        die "مستر اتصال را رد کرد (کد $code): $err"
+    fi
+    hub_pub="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hub_pubkey"])')" \
+        || die "پاسخ مستر خوانا نبود"
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+    grep -qF "$hub_pub" /root/.ssh/authorized_keys || echo "$hub_pub" >> /root/.ssh/authorized_keys
+    ok "نود به مستر وصل شد؛ ساخت جفت و تانل روی مستر در پس‌زمینه شروع شد؛ چند دقیقه بعد داشبورد مستر را ببینید"
+}
+
+parse_join_input() { # $1=دستور پیست‌شده -> JOIN_HOST/JOIN_TOKEN/JOIN_FP
+    local rest
+    if [[ "$1" == *"--join"* ]]; then
+        rest="${1##*--join }"
+    else
+        rest="$1"
+    fi
+    read -r JOIN_HOST JOIN_TOKEN JOIN_FP _ <<< "$rest"
+    [ -n "$JOIN_HOST" ] && [ -n "$JOIN_TOKEN" ] && [ -n "$JOIN_FP" ] \
+        || die "دستور اتصال ناقص است؛ باید آدرس مستر، کد و اثر انگشت را داشته باشد"
+}
+
+node_join_flow() {
+    echo "دستور اتصال مستر را که روی مستر چاپ شده، اینجا پیست کنید"
+    echo "(یا فقط سه تکه‌اش را: آدرس مستر، کد، اثر انگشت)"
+    local pasted
+    read -r -p "دستور اتصال: " pasted
+    parse_join_input "$pasted"
+    node_join "$JOIN_HOST" "$JOIN_TOKEN" "$JOIN_FP"
+}
+
+master_setup_flow() {
+    step "نصب مستر (هاب)"
+    install_hub
+    enable_bbr
+    if [ -z "$DOMAIN" ] && [ "$IP_CERT" -eq 0 ] && [ -z "$CERT_PATH" ]; then
+        if [ "$YES" -eq 0 ]; then
+            echo
+            echo "گواهی پنل را هم همین حالا بسازم؟"
+            echo "  1) دامنه   2) آی‌پی   3) بعداً (فقط لوکال می‌ماند)"
+            local g
+            read -r -p "انتخاب: " g
+            case "$g" in
+                1) cert_domain ;;
+                2) cert_ip ;;
+                *) warn "هاب فقط روی لوکال است؛ پیش از باز کردن روی اینترنت، گواهی بگیرید" ;;
+            esac
+        else
+            warn "گواهی انتخاب نشده؛ هاب فقط روی لوکال است"
+        fi
+    else
+        if [ -n "$DOMAIN" ]; then cert_domain; fi
+        if [ "$IP_CERT" -eq 1 ]; then cert_ip; fi
+        if [ -n "$CERT_PATH" ]; then cert_custom; fi
+    fi
+    local iran_ip="$IRAN_HOST"
+    [ -z "$iran_ip" ] && iran_ip="$(public_ip)"
+    [ -n "$iran_ip" ] && [ "$iran_ip" != "نامشخص" ] || die "آی‌پی این سرور پیدا نشد؛ با ‎--iran-host بدهید"
+    if [ "$YES" -eq 0 ]; then
+        ask IRAN_HOST "آی‌پی این سرور (مستر)" "$iran_ip"
+        iran_ip="$IRAN_HOST"
+    fi
+    step "ثبت مستر در دیتابیس هاب"
+    (cd "$INSTALL_DIR" && python3 -m hub.wizard --db "$HUB_DB" --self-host "$iran_ip") \
+        || die "ثبت مستر ناموفق بود"
+    if [ -n "$(active_hub_cert)" ]; then
+        print_join_command
+    else
+        warn "چون گواهی ندارید، دستور اتصال چاپ نشد؛ بعد از گرفتن گواهی، از منو «نمایش دستور اتصال نود» را اجرا کنید"
+    fi
+    summary
+}
+
 # ── BBR ─────────────────────────────────────────────────────────
 enable_bbr() {
     step "فعال‌سازی BBR"
@@ -849,7 +1006,7 @@ summary() {
 }
 
 # ── منو و اجرا ───────────────────────────────────────────────────
-menu() {
+management_menu() {
     while true; do
         echo
         echo "رهیاب — چه کاری انجام شود؟"
@@ -863,6 +1020,7 @@ menu() {
         echo "  8) نصب کلید هاب روی نود (با پسورد یک‌باره)"
         echo "  9) نصب نود روی سرور دیگر از همین‌جا (با کلید هاب)"
         echo "  10) راه‌اندازی کامل دو سرور (ویزارد: هاب + نود + تانل + نگهبان)"
+        echo "  11) نمایش دستور اتصال نود (روی مستر)"
         echo "  0) خروج"
         local c
         read -r -p "انتخاب: " c
@@ -907,10 +1065,29 @@ menu() {
                 IP_CERT=1
                 full_setup "$node"
                 ;;
+            11) print_join_command ;;
             0) info "خدانگهدار"; return 0 ;;
             *) warn "انتخاب نامعتبر" ;;
         esac
     done
+}
+
+menu() {
+    echo
+    echo "رهیاب — این سرور مستر است یا نود؟"
+    echo "  1) مستر (داشبورد و مدیریت؛ در پایان دستور اتصال نود را می‌دهد)"
+    echo "  2) نود (با دستور اتصال به مستر وصل می‌شود)"
+    echo "  3) مدیریت نصب فعلی (به‌روزرسانی، وضعیت، گواهی، حذف، ...)"
+    echo "  0) خروج"
+    local c
+    read -r -p "انتخاب: " c
+    case "$c" in
+        1) master_setup_flow ;;
+        2) node_join_flow ;;
+        3) management_menu ;;
+        0) info "خدانگهدار"; return 0 ;;
+        *) die "انتخاب نامعتبر" ;;
+    esac
 }
 
 main() {
@@ -934,8 +1111,20 @@ main() {
         full_setup "$FULL_SETUP_NODE"
         return 0
     fi
+    if [ -n "$JOIN_HOST" ]; then
+        node_join "$JOIN_HOST" "$JOIN_TOKEN" "$JOIN_FP"
+        return 0
+    fi
+    if [ "$PRINT_JOIN" -eq 1 ]; then
+        print_join_command
+        return 0
+    fi
     if [ -n "$ROLE" ]; then
         # مسیر غیرتعاملی
+        if [ "$ROLE" = "master" ]; then
+            master_setup_flow
+            return 0
+        fi
         if [ "$ROLE" = "hub" ]; then
             install_hub
         else
