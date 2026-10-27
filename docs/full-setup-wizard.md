@@ -45,11 +45,20 @@ script cannot invent trust between two strangers.
    carry no key_path, so the hub uses its default hub key. Inner
    addresses default to 10.10.11.1 (Iran) / 10.10.11.2 (foreign),
    overridable by flags. Later pairs take the next /24.
-5. **First tunnel, honestly measured** — deploy GRE (the carrier
-   that has measured best on this route in every sweep) via the
-   engine, verify ping + L7, and record its real measurement as the
-   initial `candidate_scores`. Nothing is faked: the initial map
-   holds exactly the protocols actually measured.
+5. **First tunnel, honestly measured** — `orchestrator/wizard_setup.py`
+   (`run_setup`): first seeds the engine's pinned-key store from
+   `/root/.ssh/known_hosts` (`seed_host_pins`), so a first sweep or
+   deploy connection presenting a different host key is REJECTED,
+   never blindly pinned. Then it measures ONE protocol (default GRE)
+   with the engine's own single-benchmark path (temporary test tunnel
+   on ports 8897/8898, never the production frontend) and deploys
+   that protocol for production with `deploy_tunnel` (verified +
+   rollback). A disqualified or non-positive score aborts the setup
+   instead of inventing a score. Deploy-first is required, not a
+   preference: a pair with no deployed tunnel produces no monitor
+   sample, so the healer cannot conjure the first tunnel by itself.
+   GRE verification is inner ICMP + DNAT, so it works on raw servers
+   with no listener on the foreign frontend.
 6. **Healer auto-install** — `orchestrator/install_healer_wizard.py`
    (`wizard_install`): same `install()` as the laptop installer, but
    over key auth (`KeyHost`, pinned host keys, hub key) instead of
@@ -60,6 +69,9 @@ script cannot invent trust between two strangers.
    `--once` validation pass, starts the service, and verifies the
    heartbeat reports HEALTHY. No Telegram token at setup time;
    alerts are wired later from the dashboard's own settings.
+   The measured score is also recorded in the hub pair row
+   (`hub.store.update_pair_measurement`), so the dashboard shows the
+   real score from the start.
 7. **Fill the rest by measurement** — the existing
    `benchmark_scheduler` re-runs full sweeps on ACTIVE pairs, so
    the remaining candidates arrive as real rows over time. The
