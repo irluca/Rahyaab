@@ -5,7 +5,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 let state = { servers: [], pairs: [], events: [], filter: "all", section: "overview" };
-let histories = {};
+
 let serverMetrics = {};
 let pairMetrics = {};
 
@@ -35,21 +35,6 @@ function badgeFor(st) {
            down: ["قطع / دسترس‌ناپذیر", "down"] }[st];
 }
 
-function lineChart(vals, color) {
-  if (!vals.length) return '<p class="empty">هنوز نقطه‌ای ثبت نشده است — جمع‌آوری هر دقیقه یک نقطه اضافه می‌کند.</p>';
-  const w = 300, h = 96, pad = 6;
-  const max = Math.max(...vals, 1);
-  const step = vals.length > 1 ? (w - 2 * pad) / (vals.length - 1) : 0;
-  const pts = vals.map((v, i) => [pad + i * step, h - pad - (v / max) * (h - 2 * pad)]);
-  const d = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
-  const area = d + ` L${pts[pts.length - 1][0].toFixed(1)} ${h - pad} L${pts[0][0].toFixed(1)} ${h - pad} Z`;
-  const last = pts[pts.length - 1];
-  const grid = [24, 48, 72].map(y => `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`).join("");
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}`
-    + `<path d="${area}" fill="${color}" opacity="0.20"/>`
-    + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round"/>`
-    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.5" fill="${color}"/></svg>`;
-}
 function protoClass(proto) {
   return proto === "GRE" ? "proto-GRE" : proto === "ESP" ? "proto-ESP" : "proto-other";
 }
@@ -82,10 +67,6 @@ function bar(pct, cls) {
   return `<div class="bar"><div class="fill ${cls || ""}" style="width:${p}%"></div></div>`;
 }
 
-async function loadPairHistory(pair) {
-  try { const d = await api("GET", `/api/pairs/${pair.id}/history`); histories[pair.id] = d.history; }
-  catch { histories[pair.id] = []; }
-}
 
 function renderPairs() {
   const rank = { down: 0, stale: 1, healthy: 2 };
@@ -93,7 +74,6 @@ function renderPairs() {
     .sort((a, b) => rank[pairState(a)] - rank[pairState(b)]);
   $("#pair-cards").innerHTML = list.map(p => {
     const st = pairState(p), [label, cls] = badgeFor(st);
-    const hist = histories[p.id] || [];
     const pm = pairMetrics[p.id] || [];
     const lat = pm.filter(x => x.latency_ms != null).map(x => x.latency_ms);
     const thr = pm.filter(x => x.rx_kbps != null).map(x => x.rx_kbps + x.tx_kbps);
@@ -124,11 +104,6 @@ function renderPairs() {
       </div>
       <p class="meta">مسیر داخلی: <span class="ltr">${p.inner_iran || "—"} ⇄ ${p.inner_foreign || "—"}</span></p>
       <div class="servers-mini">${serverMini(iran, "ایران")}${serverMini(foreign, "خارج")}</div>
-      <div class="charts-row">
-        <div class="chart-wrap"><div class="muted small">تأخیر تانل (ms، پینگ واقعی روی آدرس داخلی)</div>${lineChart(lat, "var(--accent)")}</div>
-        <div class="chart-wrap"><div class="muted small">توان تانل (kbps، شمارنده واقعی اینترفیس)</div>${lineChart(thr, "var(--green)")}</div>
-      </div>
-      <div class="chart-wrap health-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${lineChart(hist.map(x => x.healthy ? 1 : 0), "var(--teal)")}</div>
       <div class="chart-wrap score-wrap"><div class="muted small">امتیاز پروتکل‌ها (بنچمارک)</div>${scoreRows}</div>
       <div class="actions">
         <button class="act-btn green" data-act="refresh">↻ تازه‌سازی وضعیت</button>
@@ -242,7 +217,6 @@ async function loadAll() {
     const [s, p, ev] = await Promise.all([
       api("GET", "/api/servers"), api("GET", "/api/pairs"), api("GET", "/api/events")]);
     state.servers = s.servers; state.pairs = p.pairs; state.events = ev.events;
-    await Promise.all(state.pairs.map(loadPairHistory));
     await Promise.all([
       ...state.servers.map(async sv => {
         try { const d = await api("GET", `/api/servers/${sv.id}/metrics`); serverMetrics[sv.id] = d.metrics; }
