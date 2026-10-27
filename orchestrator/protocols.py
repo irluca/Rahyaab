@@ -1404,6 +1404,7 @@ transport.tls.keyFile = "{key_path_ir}"
 """
     frpc_toml = f"""serverAddr = "{ir_ip}"
 serverPort = {transport_port}
+loginFailExit = false
 auth.method = "token"
 auth.token = "{tok}"
 transport.tcpMux = true

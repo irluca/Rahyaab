@@ -1042,6 +1042,9 @@ class FailoverManager:
         only then does the DNAT move aside, so the cutover itself has
         no gap. A failed overlay is torn down and the carrier — never
         touched — keeps serving: restored=True with no rollback needed.
+        The overlay's client must survive starting before its server:
+        frpc retries login (loginFailExit=false), so a refused first
+        dial while frps is still coming up cannot strand the switch.
         A cutover that cannot be verified (a DNAT rule still in force,
         or the manifest not updated) is reverted the same way rather
         than leaving a half-moved frontend or a reboot time-bomb.

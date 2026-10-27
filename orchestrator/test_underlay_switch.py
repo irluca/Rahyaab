@@ -45,6 +45,19 @@ def test_carrier_dnat_cmds_gre_and_esp():
         assert len(failover._carrier_dnat_cmds(plan["teardown_foreign"])) == 0
 
 
+def test_frp_client_retries_login_instead_of_dying_on_first_refusal():
+    # 2026-10-27 live: the GRE -> frp-TLS switch failed smoke because
+    # frpc started ~2s before frps listened on :7000, and frp's
+    # default loginFailExit=true killed frpc on that single refused
+    # dial instead of retrying. With the flag off, frpc keeps dialing
+    # until frps is up, so starting the client before the server is
+    # safe and the :443 listener exists by smoke time.
+    plan = protocols.generate_deployment("frp-TLS", 1, "198.51.100.10", "203.0.113.20", 443)
+    frpc_configs = [c for c in plan["foreign_files"].values() if "serverAddr" in c]
+    assert len(frpc_configs) == 1, plan["foreign_files"].keys()
+    assert "loginFailExit = false" in frpc_configs[0]
+
+
 def test_manifest_dnat_rows_and_path():
     for proto, svc in (("GRE", "best-tunnel-prod-p1-gre"), ("ESP", "best-tunnel-prod-p1-esp")):
         plan = protocols.generate_deployment(proto, 1, "198.51.100.10", "203.0.113.20", 443)
