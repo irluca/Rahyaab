@@ -47,8 +47,8 @@ function lineChart(vals, color) {
   const grid = [24, 48, 72].map(y => `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`).join("");
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}`
     + `<path d="${area}" fill="${color}" opacity="0.20"/>`
-    + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>`
-    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3.5" fill="${color}"/></svg>`;
+    + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round"/>`
+    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.5" fill="${color}"/></svg>`;
 }
 function protoClass(proto) {
   return proto === "GRE" ? "proto-GRE" : proto === "ESP" ? "proto-ESP" : "proto-other";
