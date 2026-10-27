@@ -180,12 +180,12 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .servers-mini { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
 .server-mini { background: var(--well); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; }
 .server-mini-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-.server-mini-head b { font-size: 14px; }
+.server-mini-head b { font-size: 15px; }
 .server-mini-head .host { color: var(--muted); font-size: 12px; margin-inline-start: auto; }
 .mini-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); flex-shrink: 0; box-shadow: 0 0 8px var(--green); }
 .mini-dot.stale { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
 .mini-dot.unknown { background: var(--muted); box-shadow: none; }
-.mini-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 6px; }
+.mini-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .mini-row b { color: var(--text); font-weight: 600; }
 .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .tunnel-box .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
@@ -213,20 +213,24 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .server-card h3 { margin: 0 0 4px; }
 
 /* Wide screens: the pair card goes horizontal instead of growing down.
-   Columns: identity | servers+scores | charts+health; actions span all.
-   Everything stays thin and compact, like on phones. Below 901px the
-   card keeps its vertical layout. */
+   Order: identity + the two server boxes side by side on top, then the
+   charts and graphs BELOW those two boxes, then actions. The server
+   boxes are NOT shrunk: they stay full-size, equal, side by side.
+   Below 901px the card keeps its vertical layout (which already has
+   the charts below the servers). */
 @media (min-width: 901px) {
   .tunnel-box { display: grid;
-    grid-template-columns: 240px minmax(0, 1fr) minmax(0, 1.2fr);
+    grid-template-columns: 280px minmax(0, 1fr) minmax(0, 1fr);
     grid-template-areas:
-      "head servers charts"
-      "meta scores health"
+      "head servers servers"
+      "meta servers servers"
+      "charts charts charts"
+      "health health scores"
       "actions actions actions";
     gap: 12px 16px; align-items: start; }
   .tunnel-box > .tunnel-head { grid-area: head; flex-direction: column; align-items: flex-start; gap: 10px; }
   .tunnel-box > .meta { grid-area: meta; margin: 0; }
-  .tunnel-box > .servers-mini { grid-area: servers; grid-template-columns: 1fr 1fr; margin-top: 0; gap: 10px; }
+  .tunnel-box > .servers-mini { grid-area: servers; grid-template-columns: 1fr 1fr; margin-top: 0; gap: 12px; align-items: start; }
   .tunnel-box > .charts-row { grid-area: charts; }
   .tunnel-box > .health-wrap { grid-area: health; }
   .tunnel-box > .score-wrap { grid-area: scores; }
@@ -235,7 +239,6 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
   .tunnel-box .chart-wrap { margin-top: 0; }
   .tunnel-box .tunnel-kpis { margin-inline-start: 0; width: 100%; }
   .tunnel-box .kpi { flex: 1; min-width: 0; padding: 8px 10px; }
-  .tunnel-box .server-mini { padding: 12px; }
   /* The content column is capped so wide screens do not stretch the
      dashboard thin. */
   .main { max-width: 1600px; margin-inline: auto; width: 100%; }
