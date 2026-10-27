@@ -11,7 +11,7 @@
   --amber: #ffb020; --red: #ff5c6c; --violet: #a78bfa; --pink: #f472b6;
   --teal: #2dd4bf; --orange: #fb923c; --radius: 18px;
   --surface: linear-gradient(180deg, #161e2e, #101623); --surface-end: #101623;
-  --well: #0a0f1a; --ghost-bg: #ffffff08; --track: #ffffff12; --grid: #ffffff14;
+  --well: #0a0f1a; --well-grad: linear-gradient(180deg, #131b2b, #0c1220); --ghost-bg: #ffffff08; --track: #ffffff12; --grid: #ffffff14;
   --shadow: 0 12px 32px #00000055, inset 0 1px 0 #ffffff10;
   --shadow-lg: 0 18px 40px #00000066, inset 0 1px 0 #ffffff10;
   --shadow-sm: 0 8px 20px #00000044;
@@ -24,7 +24,7 @@
   --amber: #9a6700; --red: #cf222e; --violet: #8250df; --pink: #bf3989;
   --teal: #0e8074; --orange: #9a6700;
   --surface: linear-gradient(180deg, #ffffff, #f3f5f9); --surface-end: #f3f5f9;
-  --well: #edf0f5; --ghost-bg: #00000006; --track: #00000012; --grid: #00000014;
+  --well: #edf0f5; --well-grad: linear-gradient(180deg, #f4f6fa, #e8edf4); --ghost-bg: #00000006; --track: #00000012; --grid: #00000014;
   --shadow: 0 12px 28px #1c24301f, inset 0 1px 0 #ffffff;
   --shadow-lg: 0 18px 36px #1c243026, inset 0 1px 0 #ffffff;
   --shadow-sm: 0 8px 18px #1c243014;
@@ -220,7 +220,7 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .score-wrap { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
 .proto-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; align-items: stretch; }
 .proto-chip { flex: 1 1 210px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-  background: var(--well); border: 1px solid var(--line); border-radius: 14px;
+  background: var(--well-grad); border: 1px solid var(--line); border-radius: 14px;
   padding: 8px 12px 9px; font-size: 12px; color: var(--text); box-shadow: var(--shadow-sm); }
 .proto-chip b { font-weight: 800; }
 .proto-chip.on { border-color: #3ddc8455; box-shadow: var(--shadow-sm), 0 0 18px #3ddc8422; }
