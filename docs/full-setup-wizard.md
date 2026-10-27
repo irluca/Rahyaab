@@ -50,12 +50,16 @@ script cannot invent trust between two strangers.
    engine, verify ping + L7, and record its real measurement as the
    initial `candidate_scores`. Nothing is faked: the initial map
    holds exactly the protocols actually measured.
-6. **Healer auto-install** — generate a dedicated healer keypair on
-   the hub server, append its public key to BOTH servers over the
-   hub key, write the healer config (pair, hosts, key path,
-   frontend port, active tunnel, candidate scores) + unit with
-   `orchestrator/install_healer.py`'s install path adapted to
-   key auth, and start it. Verify the heartbeat reports HEALTHY.
+6. **Healer auto-install** — `orchestrator/install_healer_wizard.py`
+   (`wizard_install`): same `install()` as the laptop installer, but
+   over key auth (`KeyHost`, pinned host keys, hub key) instead of
+   passwords. It generates a dedicated healer keypair on the hub
+   server if missing (never overwrites), authorises it on BOTH
+   servers, writes the healer config (pair, hosts, key path,
+   frontend port, active tunnel, candidate scores) + unit, runs the
+   `--once` validation pass, starts the service, and verifies the
+   heartbeat reports HEALTHY. No Telegram token at setup time;
+   alerts are wired later from the dashboard's own settings.
 7. **Fill the rest by measurement** — the existing
    `benchmark_scheduler` re-runs full sweeps on ACTIVE pairs, so
    the remaining candidates arrive as real rows over time. The
