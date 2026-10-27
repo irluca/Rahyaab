@@ -216,7 +216,8 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .score-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .proto-chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .proto-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--well);
-  border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12px; }
+  border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12px;
+  color: var(--text); }
 .proto-chip b { font-weight: 800; }
 .proto-chip.on { border-color: #3ddc8455; }
 .proto-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
