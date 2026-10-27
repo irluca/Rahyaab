@@ -105,9 +105,9 @@ def test_full_hub_flow(hub):
     assert status == 200 and client.cookie
     # Fleet: two servers, then a pair between them.
     _, iran = client.request("POST", "/api/servers",
-                             {"name": "iran", "host": "94.184.23.90"})
+                             {"name": "iran", "host": "203.0.113.10"})
     _, foreign = client.request("POST", "/api/servers",
-                                {"name": "foreign", "host": "217.11.164.209"})
+                                {"name": "foreign", "host": "203.0.113.20"})
     assert iran["id"] != foreign["id"]
     status, _ = client.request("POST", "/api/pairs",
                                {"name": "bad", "iran_server_id": iran["id"],

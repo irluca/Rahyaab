@@ -1,84 +1,110 @@
-# Rahyaab (رهیاب)
+<div align="center">
 
-Server-side tunnel control plane, derived from Tunnel Studio Pro.
-The dashboard, checking and monitoring run on a server, and tunnels
-can be built between any two fleet servers — not only the dashboard host.
+# 🚀 Rahyaab (رهیاب)
 
-Red line, unchanged from Tunnel Studio Pro: this tool only establishes
-the best tunnel between servers, monitors it constantly, and
-re-establishes it immediately if cut. It never touches a PasarGuard
-panel — no configs, nodes or users, by any path.
+**A server-side control plane that finds, deploys, and keeps alive the best tunnel between any two servers — automatically.**
 
-## Layout
+[![Tests](https://img.shields.io/badge/offline%20tests-176%20passing-brightgreen)](#-testing)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](#-quick-start)
+[![Release](https://img.shields.io/badge/release-v1.0-orange)](https://github.com/irluca/Rahyaab/releases/tag/v1.0)
 
-- `orchestrator/` — the proven Tunnel Studio Pro engine, ported
-  wholesale (benchmark, deploy, healer, failover, alerts). Its offline
-  suite lives here as `test_offline_suite.py`.
-- `agent/` — the resident Rust agent (restart-only, reports only),
-  ported wholesale.
-- `hub/` — Phase 2: fleet registry, pairs, JSON API, healer control,
-  jobs, login. (In progress.)
-- `dashboard/` — Phase 3: the new dashboard, built fresh. It will not
-  resemble the old Tunnel Studio Pro dashboard.
-- Root `*.sh` / `*.bat` — the shipped server installers and launchers
-  the engine's supply-chain tests pin. They are part of the port, not
-  decoration: the suite fails without them at the repo root.
+[🇮🇷 فارسی](README.fa.md)
 
-## Status
+</div>
 
-- Phase 1 (foundation) — DONE 2026-10-26: engine + agent ported,
-  offline suite green: **158 passed, 13 subtests passed**.
-- Phase 2 (hub control plane) — DONE 2026-10-26: stdlib JSON API
-  (setup-once operator account, PBKDF2 + hashed session tokens,
-  fleet/pair CRUD, healer status/start/stop/restart over
-  key-only SSH, background job queue, events). Offline test green
-  (hub/test_hub.py), plus a live CLI smoke run (health, setup,
-  second-setup refused). Since the evening of 2026-10-26 the hub is
-  PUBLIC at https://94.184.23.90:8890 (self-signed cert, Secure
-  cookies, HSTS, login rate limiting) by the user's decision; before
-  that it was localhost-only via SSH forwarding.
-- Phase 3 (new dashboard) — DONE 2026-10-26: single-page app in
-  dashboard/ (RTL, right sidebar, dark professional theme, Vazirmatn,
-  counter strip with click-to-filter, pair cards with real SVG history
-  charts, events timeline, Ctrl-K palette, login/setup views), served
-  by the hub itself. Charts draw only from a new healer_history table
-  (one point per status refresh; no point, no line — never faked).
-  Tests green (hub/test_hub.py + hub/test_dashboard.py), JS syntax
-  checked, CLI smoke run served the page.
-- Phase 4 (live install on the two servers + live tests via the hub)
-  — DONE 2026-10-26 evening: hub installed on the Iran host
-  (`rahyaab-hub`, 127.0.0.1:8890), pair manag-netlen adopted (GRE,
-  10.10.11.x, sweep scores), live tests through the hub API all
-  passed (healer healthy, healer_status + connectivity jobs, history
-  points, healer restart and recovery with a new pid). The throwaway
-  test operator was deleted afterwards; the hub is setup-pending for
-  the real operator. GRE still serving (0% loss, ~37 ms) and the
-  foreign :443 listener untouched throughout.
-- Phase 5 (private GitHub repo push + tag + final report) — pending
-  push: local repo committed (`b300f50`, branch `main`, hub key
-  verified absent) and runbook in `docs/phase5-runbook.md`; push
-  waits on the user creating the empty private repo and adding the
-  VM deploy key. The v1.0 tag waits for Phase 4's live tests.
+---
 
-## نصب روی سرور (install.sh)
+Rahyaab is a server-side tunnel control plane, derived from Tunnel Studio Pro. The dashboard, health checking and monitoring run on a server (the hub), and tunnels can be built between any two servers in the fleet — not only the dashboard host. Once a tunnel is up, a resident healer on the Iran-side server watches it and restores it the moment it drops, switching protocols if it has to. One rule above all others: **it only builds the best tunnel between servers, monitors it, and re-establishes it — it never touches a PasarGuard panel, its configs, nodes or users, by any path.**
 
-نصب‌کننده یک‌خطی و زیبای رهیاب که روی خود سرور اجرا می‌شود
-(با ایده از نصب‌کننده‌های BackPack و Kariz — منوی تعاملی، بدون داکر):
+## ✨ What it does
+
+- 🔍 **Real benchmarks** — latency, jitter, loss and throughput measured on real traffic for every protocol, with per-protocol history.
+- 🏆 **Evidence-based selection** — protocols are ranked on measured medians, never on simulated rows.
+- 🚀 **One-command install** — `install.sh` sets up the hub or a node, enables BBR, and issues the panel certificate (domain or IP).
+- 🔄 **Click-to-switch** — switch the live tunnel to another protocol from the dashboard, with a confirmation dialog and automatic rollback if the new protocol fails its health check.
+- 🛡️ **Failover with a memory** — the healer retries the same tunnel, then walks candidates until one is healthy; an anti-flap circuit breaker stops rapid repeated switches, and a failed switch never consumes the quota.
+- 👁️ **Live dashboard** — pair cards, server gauges (CPU, memory, disk, uptime), real ping and throughput, event timeline, and a protocol chip line where a blinking green light marks the active protocol. Charts draw only from real collected history — no point, no line, never faked.
+- 🔐 **Key-only access** — the hub reaches servers over SSH with keys only; unknown hosts are rejected; operator passwords are PBKDF2-hashed and sessions are hashed too.
+
+## 🌐 Protocols
+
+| Type | Protocols |
+|---|---|
+| Carriers | `GRE`, `ESP` |
+| Overlays | `backhaul-wss`, `rathole-noise`, `chisel-wss`, `frp-TLS`, `wstunnel-v10`, `xray-reverse`, `kcptun`, `hysteria2` |
+| Quarantined | `sing-box` VLESS-REALITY, SS-2022 — disabled unless explicitly enabled, pending full live validation |
+
+## 🧭 Safety principles
+
+1. **Only its own units.** The tool creates, restarts and removes exclusively the services and firewall rules tagged as its own — pre-existing tunnels and services are never modified.
+2. **Fail closed.** A failed health check stops the switch before any traffic moves; a failed overlay leaves the live carrier untouched.
+3. **Automatic rollback.** If a new protocol fails verification, the previous one is restored automatically.
+4. **No secrets in the tree.** Keys, passwords and tokens live outside the repository; the hub's own key is git-ignored and verified absent from every commit.
+5. **No panel integration.** Deliberately no access to any user-management panel — the tool hands over a healthy tunnel, and what runs over it is the operator's own business.
+
+## ⚡ Quick start
+
+**Requirements:** Debian/Ubuntu servers, Python 3.11+, root on the target server.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh)
+# 1. Download the installer (fails loudly if the download fails)
+curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh
+
+# 2. Run it — interactive menu (install hub or node, BBR, panel certificate, update, status, uninstall)
+bash /tmp/install-rahyaab.sh
 ```
 
-منو: نصب هاب (داشبورد) یا نود (بدون داشبورد)، فعال‌سازی BBR،
-گواهی پنل (دامنه با Let's Encrypt و تمدید خودکار، آی‌پی با
-self-signed و تایمر تمدید خودکار، یا گواهی آماده خودتان)،
-به‌روزرسانی کد، نمایش وضعیت، حذف. مسیر غیرتعاملی هم دارد
-(`--role hub --bbr --domain panel.example.com --email you@example.com`
-یا `--role hub --bbr --ip-cert`) و با `--local` می‌شود از روی
-فایل‌های محلی نصب کرد (تا وقتی ریپوی فاز ۵ پوش نشده).
+Non-interactive:
 
-نکته‌ها: اجرای دوباره امن است (دیتابیس و گواهی‌ها دست نمی‌خورند)؛
-ساخت حساب اپراتور، افزودن سرورها، بنچمارک و پیکربندی نگهبان از
-داخل داشبورد انجام می‌شود؛ اسکریپت به PasarGuard و به نگهبانِ در
-حال اجرا دست نمی‌زند. توجه: Let's Encrypt برای آی‌پی خالی گواهی
-نمی‌دهد، پس مسیر آی‌پی self-signed است (مرورگر بار اول هشدار می‌دهد).
+```bash
+bash /tmp/install-rahyaab.sh --role hub --bbr --ip-cert --yes                                    # hub + BBR + self-signed IP cert (auto-renewed)
+bash /tmp/install-rahyaab.sh --role hub --bbr --domain panel.example.com --email you@example.com --yes  # hub + Let's Encrypt
+bash /tmp/install-rahyaab.sh --role node --bbr --yes                                              # node (no dashboard)
+```
+
+Then open **https://YOUR-SERVER-IP:8890**, create the operator account (setup form, shown only because no account exists yet), add servers, run a benchmark, create a pair, and enable the healer. Re-running the installer is safe: the database and existing certificates are never overwritten.
+
+**Notes:** Let's Encrypt does not issue certificates for bare IPs, so the IP path is self-signed (the browser warns once; the fingerprint is printed by the installer for comparison) with a daily timer that renews it before expiry. A private fork needs `GITHUB_TOKEN` (a read-only fine-grained PAT) for the download path, or `--local` with an uploaded copy of the code.
+
+## 🧪 Testing
+
+The behaviour contract is an offline suite (no servers needed):
+
+```bash
+python -m pytest orchestrator/ -q
+# 176 tests + 13 subtests — benchmarks, failover, safety gates, installer hygiene…
+python -m pytest hub/ -q
+# hub API, dashboard, benchmarks, switch
+```
+
+## 🗂️ Layout
+
+```
+orchestrator/     proven engine: benchmark, deploy, healer, failover, alerts, offline suite
+agent/            resident Rust agent (restart-only, reports only)
+hub/              fleet registry, pairs, JSON API, healer control, jobs, login
+dashboard/        fresh single-page dashboard (RTL, Vazirmatn, dark theme)
+install.sh        server installer (hub/node, BBR, certificates, update, uninstall)
+*.sh              standalone installer pairs (iran-*.sh / foreign-*.sh)
+docs/             runbooks (phases, panel survey)
+```
+
+## 🗺️ Status
+
+- **Phase 1 (foundation)** — DONE 2026-10-26: engine + agent ported, suite green.
+- **Phase 2 (hub)** — DONE 2026-10-26: stdlib JSON API, fleet/pair CRUD, healer control, jobs, events.
+- **Phase 3 (dashboard)** — DONE 2026-10-26: fresh dashboard, served by the hub itself.
+- **Phase 4 (live install + tests)** — DONE 2026-10-26: hub on the Iran host, live pair adopted, live API tests passed, overlay switching proven live (carrier↔carrier and carrier↔overlay).
+- **Phase 5 (repo + tag)** — DONE 2026-10-27: public repo, tag `v1.0`.
+- **Installer 1.0.2** — DONE 2026-10-27: live-tested on both servers (node + hub, BBR, IP certificate kept, healer and tunnel untouched).
+
+## 📌 Scope
+
+This tool's job begins and ends with the tunnel itself: establish the best one, watch it, restore it. It deliberately has **no integration with any panel or user-management system**.
+
+---
+
+<div align="center">
+<sub>Public project — built and maintained with ❤️ for one operator.</sub>
+</div>

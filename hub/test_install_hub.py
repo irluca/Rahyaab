@@ -23,7 +23,7 @@ def test_public_unit_binds_all_with_tls():
 
 
 def test_adoption_script_adopts_live_pair_and_compiles():
-    script = adoption_script("94.184.23.90", "217.11.164.209")
+    script = adoption_script("203.0.113.10", "203.0.113.20")
     compile(script, "adopt.py", "exec")
     assert "manag-netlen" in script
     assert "GRE" in script and "10.10.11.1" in script and "10.10.11.2" in script

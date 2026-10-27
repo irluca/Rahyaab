@@ -13,7 +13,9 @@ One of these, then tell Muse it is done:
 
 1. **Preferred (same as Tunnel Studio Pro):** create an empty
    PRIVATE repo on GitHub named `Rahyaab`, then add this VM's public
-   key (safe to share) as a deploy key with **write** access. The
+   key (safe to share) as a deploy key with **write** access.
+   (Done 2026-10-27 — and the repo was then made public the same day,
+   so the installer download path works without a token.) The
    deploy key is per-repo, so the Tunnel_Studio_Pro key does not
    carry over — add this one to the new repo:
    `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID+cFqcIhiMEORrQz42eyyXC186JR6aT5zVwazqZq4/m hatch`

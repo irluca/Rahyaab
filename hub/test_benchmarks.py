@@ -134,9 +134,9 @@ def api(tmp_path, monkeypatch):
                                {"username": "admin", "password": "change-me-123"})
     assert status == 200 and client.cookie
     _, iran = client.request("POST", "/api/servers",
-                             {"name": "iran", "host": "94.184.23.90"})
+                             {"name": "iran", "host": "203.0.113.10"})
     _, foreign = client.request("POST", "/api/servers",
-                                {"name": "foreign", "host": "217.11.164.209"})
+                                {"name": "foreign", "host": "203.0.113.20"})
     status, pair = client.request("POST", "/api/pairs",
                                   {"name": "manag-netlen",
                                    "iran_server_id": iran["id"],

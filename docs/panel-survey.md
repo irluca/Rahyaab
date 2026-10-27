@@ -1,7 +1,7 @@
 # Panel survey — live exploration notes (2026-10-26)
 
 Goal: install Smite, BackPack, Kariz and several foreign tunnel panels on the
-two live servers (Iran 94.184.23.90, foreign 217.11.164.209), build a real
+two live servers (Iran 203.0.113.10, foreign 203.0.113.20), build a real
 tunnel with each, study the dashboard, and take layout/UX ideas into Rahyaab.
 Ideas only — no copied code. Kariz: running official releases on own servers
 is allowed by its licence; its core must not be copied or reused.

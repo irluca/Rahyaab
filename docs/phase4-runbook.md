@@ -40,7 +40,7 @@ first connect; compare it with `ssh-keygen -lf
 ~~SSH forwarding~~ — superseded on the evening of 2026-10-26 by the
 user's decision to expose the panel publicly:
 
-1. Open https://94.184.23.90:8890/ directly and create the operator
+1. Open https://203.0.113.10:8890/ directly and create the operator
    account (setup form, shown only because no account exists yet).
    Use a strong password: the panel is now on the public internet,
    protected by login + rate limiting (10 failed logins per 5

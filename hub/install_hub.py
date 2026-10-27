@@ -308,8 +308,8 @@ def expose_public(remote: Remote, iran_host: str) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Install the Rahyaab hub (Phase 4)")
-    parser.add_argument("--iran-host", default="94.184.23.90")
-    parser.add_argument("--foreign-host", default="217.11.164.209")
+    parser.add_argument("--iran-host", default="203.0.113.10")
+    parser.add_argument("--foreign-host", default="203.0.113.20")
     parser.add_argument("--hub-key", default=str(HUB_KEY))
     parser.add_argument("--check-only", action="store_true",
                         help="connect and preflight only, change nothing")

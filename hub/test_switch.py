@@ -53,8 +53,8 @@ def _done_result(request):
 
 
 def _make_pair(store):
-    iran = store.create_server({"name": "iran", "host": "94.184.23.90"})
-    foreign = store.create_server({"name": "foreign", "host": "217.11.164.209"})
+    iran = store.create_server({"name": "iran", "host": "203.0.113.10"})
+    foreign = store.create_server({"name": "foreign", "host": "203.0.113.20"})
     return store.create_pair({
         "name": "manag-netlen", "iran_server_id": iran["id"],
         "foreign_server_id": foreign["id"], "healer_server_id": iran["id"],
@@ -211,9 +211,9 @@ def test_switch_route_end_to_end(tmp_path):
                                    {"username": "admin", "password": "change-me-123"})
         assert status == 200
         _, iran = client.request("POST", "/api/servers",
-                                 {"name": "iran", "host": "94.184.23.90"})
+                                 {"name": "iran", "host": "203.0.113.10"})
         _, foreign = client.request("POST", "/api/servers",
-                                    {"name": "foreign", "host": "217.11.164.209"})
+                                    {"name": "foreign", "host": "203.0.113.20"})
         status, pair = client.request("POST", "/api/pairs", {
             "name": "manag-netlen", "iran_server_id": iran["id"],
             "foreign_server_id": foreign["id"],
