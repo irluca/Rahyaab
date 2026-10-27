@@ -28,6 +28,11 @@ tearing units down on the same hosts will fight mid-switch, and the
 loser resurrects the unit the winner just replaced. Stop the healer
 first (systemctl stop best-tunnel-healer), then use the dashboard again.
 
+The one channel through the rule is the manual-switch request file
+(see orchestrator/manual_switch.py): the hub may write a request, but
+only the healer decides and executes it, with the same machinery as an
+automatic failover. The hub never deploys.
+
 Configuration (/etc/best-tunnel/healer.json, 0600) is written by
 install_healer.py from the laptop's pair row and benchmark medians. It
 carries no password; the Telegram token inside it is optional, and the
@@ -40,6 +45,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 
 # The healer runs from orchestrator/, so flat imports resolve.
@@ -48,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import alerter
 import failover
 import failover_monitor
+import manual_switch
 import storage
 from local_runner import LocalRunner
 from mock_ssh import get_ssh_runner
@@ -234,6 +241,18 @@ def write_heartbeat(path: str, cfg: dict, monitor: failover_monitor.FailoverMoni
         "armed": status["armed"],
         "verdicts": status["verdicts"],
     }
+    try:
+        # The hub syncs its displayed protocol from this field, so a
+        # switch (manual or automatic) moves the dashboard's green
+        # light even if the hub job that asked for it never reports.
+        # Best-effort: a locked database must not break the heartbeat.
+        pairs = monitor.pair_source()
+        if pairs:
+            active = (pairs[0].get("active_tunnel") or "").strip()
+            if active:
+                payload["active_tunnel"] = active
+    except Exception:
+        pass
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
@@ -268,18 +287,46 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, _handle)
     monitor.start(auto_heal=True)
     heartbeat_path = cfg.get("heartbeat_path") or DEFAULT_HEARTBEAT_PATH
+    # At most one manual switch runs at a time, in its own thread, so
+    # the heartbeat keeps writing while a switch deploys. The switch
+    # holds the monitor's action lock, so an auto pass waits it out
+    # instead of tearing down the same units mid-switch.
+    switch_thread = None
     try:
         while not stop["flag"]:
             try:
                 write_heartbeat(heartbeat_path, cfg, monitor)
             except Exception as exc:
                 print(f"healer: heartbeat write failed: {exc}", file=sys.stderr)
+            try:
+                if switch_thread is not None and not switch_thread.is_alive():
+                    switch_thread = None
+                if switch_thread is None:
+                    request = manual_switch.consume(manual_switch.REQUEST_PATH)
+                    if request is not None:
+                        if manual_switch.is_stale(request):
+                            manual_switch.write_result(
+                                manual_switch.RESULT_PATH,
+                                {"request_id": request["request_id"],
+                                 "status": "refused", "from": "", "to": request["protocol"],
+                                 "already": False, "rolled_back": False,
+                                 "detail": "switch request expired before the healer read it"})
+                        else:
+                            switch_thread = threading.Thread(
+                                target=manual_switch.run_manual_switch,
+                                args=(monitor, request, manual_switch.RESULT_PATH),
+                                daemon=True, name="manual-switch")
+                            switch_thread.start()
+            except Exception as exc:
+                print(f"healer: switch request check failed: {exc}", file=sys.stderr)
             for _ in range(10):
                 if stop["flag"]:
                     break
                 time.sleep(1)
     finally:
         monitor.stop(timeout=10.0)
+        if switch_thread is not None:
+            switch_thread.join(timeout=30.0)
     return 0
 
 

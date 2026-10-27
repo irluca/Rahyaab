@@ -199,6 +199,12 @@ class FailoverMonitor:
         self._streak: dict[int, int] = {}
         self._armed: set[int] = set()
         self._verdict: dict[int, str] = {}
+        # Serialises a monitor pass against an out-of-band switch (the
+        # healer's manual switch): both tear units down on the same
+        # hosts, so they must never run at the same time. run_once holds
+        # it for the whole pass; the manual path holds it for the whole
+        # switch, including its rollback.
+        self._action_lock = threading.Lock()
         # Last verdict that actually sampled the tunnel, per pair. SKIP
         # and LOCK passes must not overwrite it: a lock-held pass between
         # an outage alert and the recovery would otherwise swallow the
@@ -209,10 +215,23 @@ class FailoverMonitor:
         self._thread: threading.Thread | None = None
         self.daily_summary_file: str | None = None
 
+    def action_lock(self):
+        """Mutex shared by run_once and the healer's manual switch.
+
+        The caller holds it for the whole action (pass or switch). The
+        other side blocks until the action finishes, then proceeds
+        against the state the action left behind.
+        """
+        return self._action_lock
+
     # ---- one pass ------------------------------------------------------------
 
     def run_once(self, auto_heal: bool = None) -> list[dict]:
         """Sample every monitored pair once and return one decision dict per pair."""
+        with self._action_lock:
+            return self._run_once_locked(auto_heal)
+
+    def _run_once_locked(self, auto_heal: bool = None) -> list[dict]:
         may_act = auto_heal_enabled() if auto_heal is None else bool(auto_heal)
         results = []
         for pair in self.pair_source():

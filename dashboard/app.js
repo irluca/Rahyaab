@@ -80,7 +80,11 @@ function renderPairs() {
     const scores = Object.entries(p.candidate_scores || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
     const scoreChips = scores.length ? scores.map(([name, score]) => {
       const active = p.current_protocol && name === p.current_protocol;
-      return `<span class="proto-chip ${active ? "on" : "off"}"><span class="proto-dot ${active ? "pulse" : ""}"></span><span class="ltr">${name}</span><b class="ltr">${score}</b></span>`;
+      const inner = `<span class="proto-dot ${active ? "pulse" : ""}"></span><span class="ltr">${name}</span><b class="ltr">${score}</b>`;
+      // The active chip stays a span; every other chip is a button that
+      // opens the switch confirm dialog. Same look, same size, same order.
+      return active ? `<span class="proto-chip on">${inner}</span>`
+        : `<button type="button" class="proto-chip off" data-proto="${name}">${inner}</button>`;
     }).join("")
       : '<p class="muted small">امتیازی ثبت نشده است.</p>';
     const iran = state.servers.find(s => s.id === p.iran_server_id);
@@ -124,6 +128,15 @@ function renderPairs() {
       await api("POST", `/api/pairs/${id}/healer/restart`);
       showBanner("دستور ری‌استارت نگهبان فرستاده شد.");
     };
+    card.querySelectorAll("button.proto-chip").forEach(chip => {
+      chip.onclick = () => {
+        const pair = state.pairs.find(x => x.id === +id);
+        openSwitchDialog(+id, pair ? pair.current_protocol : "", chip.dataset.proto);
+      };
+    });
+    // The 20-second auto-refresh re-renders cards mid-switch; keep the
+    // switching state visible on the card until the flow finishes.
+    if (activeSwitch && activeSwitch.pairId === +id) markSwitching(card, activeSwitch.to);
   });
 }
 
@@ -235,10 +248,70 @@ async function loadAll() {
   }
 }
 
-function showBanner(msg, isError = false) {
+function showBanner(msg, isError = false, ms = 6000) {
   const b = $("#banner"); b.textContent = msg; b.hidden = false;
   b.style.borderColor = isError ? "var(--red)" : "var(--amber)";
-  setTimeout(() => b.hidden = true, 6000);
+  setTimeout(() => b.hidden = true, ms);
+}
+
+// ---- manual switch (click a protocol chip) ------------------------------
+let activeSwitch = null;
+
+function markSwitching(card, to) {
+  card.classList.add("switching");
+  let el = card.querySelector(".switch-status");
+  if (!el) { el = document.createElement("div"); el.className = "switch-status"; card.appendChild(el); }
+  el.innerHTML = `<span class="status-dot pulse"></span><span>در حال سوییچ به <span class="ltr">${to}</span>… (استقرار و راستی‌آزمایی سلامت)</span>`;
+}
+
+function openSwitchDialog(pairId, from, to) {
+  $("#switch-from").textContent = from || "—";
+  $("#switch-to").textContent = to;
+  activeSwitch = { pairId, from, to };
+  $("#switch-dialog").showModal();
+}
+
+$("#switch-cancel").onclick = () => { $("#switch-dialog").close(); activeSwitch = null; };
+
+$("#switch-confirm").onclick = async () => {
+  $("#switch-dialog").close();
+  const s = activeSwitch; if (!s) return;
+  const card = document.querySelector(`#pair-cards .tunnel-box[data-id="${s.pairId}"]`);
+  if (card) markSwitching(card, s.to);
+  try {
+    const job = await api("POST", `/api/pairs/${s.pairId}/switch`, { protocol: s.to });
+    const done = await pollJob(job.id, 660);
+    activeSwitch = null;
+    loadAll();
+    if (!done) { showBanner("نتیجه سوییچ هنوز مشخص نیست؛ وضعیت تازه‌سازی می‌شود.", true, 15000); return; }
+    if (done.status === "failed") { showBanner("جاب سوییچ خطا خورد: " + (done.error || "نامشخص"), true, 15000); return; }
+    const out = done.output || {};
+    if (out.status === "done") showBanner(`تانل به ${s.to} سوییچ شد و سالم است.`, false, 15000);
+    else if (out.status === "already") showBanner(`تانل همین حالا روی ${s.to} است.`, false, 15000);
+    else if (out.status === "refused") showBanner(refusedMessage(out.detail), true, 15000);
+    else if (out.status === "unknown") showBanner("نتیجه سوییچ هنوز مشخص نیست؛ وضعیت تازه‌سازی می‌شود.", true, 15000);
+    else if (out.rolled_back) showBanner(`سوییچ به ${s.to} ناموفق بود؛ تانل روی ${out.from || s.from} برگشت و سالم است.`, true, 15000);
+    else showBanner(`سوییچ به ${s.to} ناموفق بود و بازگشت خودکار هم انجام نشد؛ تانل را بررسی کنید.`, true, 15000);
+  } catch (e) {
+    activeSwitch = null;
+    loadAll();
+    showBanner("سوییچ انجام نشد: " + (e.message || "خطای شبکه"), true, 15000);
+  }
+};
+
+function refusedMessage(detail) {
+  if (/circuit|flap/i.test(detail || "")) return "سوییچ انجام نشد: از سوییچ قبلی کمتر از ۳ دقیقه گذشته است؛ کمی بعد دوباره تلاش کنید.";
+  return "سوییچ رد شد: " + (detail || "نامشخص");
+}
+
+async function pollJob(jobId, timeoutSec) {
+  const deadline = Date.now() + timeoutSec * 1000;
+  while (Date.now() < deadline) {
+    const job = await api("GET", `/api/jobs/${jobId}`);
+    if (job.status === "done" || job.status === "failed") return job;
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  return null;
 }
 
 function showSection(name) {

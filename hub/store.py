@@ -230,6 +230,17 @@ class Store:
                 "UPDATE pairs SET healer_last_status = ?, healer_last_seen = ? WHERE id = ?",
                 (json.dumps(status), now, pair_id),
             )
+            # The heartbeat carries the healer's recorded protocol, so
+            # the displayed protocol follows any switch (manual or
+            # automatic) even when the switch job itself never reports.
+            # A heartbeat without the field leaves the row untouched.
+            heartbeat = (status or {}).get("heartbeat") or {}
+            active = (heartbeat.get("active_tunnel") or "").strip()
+            if active:
+                conn.execute(
+                    "UPDATE pairs SET current_protocol = ? WHERE id = ?",
+                    (active, pair_id),
+                )
             # Every refresh appends one history point. Charts in Phase 3
             # draw only from this table: no measured point, no point.
             conn.execute(
@@ -240,6 +251,13 @@ class Store:
                  1 if status.get("unit_active") else 0,
                  1 if status.get("healthy") else 0,
                  status.get("heartbeat_age_seconds")),
+            )
+
+    def update_pair_protocol(self, pair_id: int, protocol: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pairs SET current_protocol = ? WHERE id = ?",
+                (protocol, pair_id),
             )
 
     def list_healer_history(self, pair_id: int, limit: int = 200) -> list[dict]:

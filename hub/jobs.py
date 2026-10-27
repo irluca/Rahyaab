@@ -10,12 +10,24 @@ Job types shipped in Phase 2:
 - healer_status: refresh a pair's healer snapshot from its healer host.
 - connectivity:   run `echo rahyaab-ok` on a pair's healer host.
 - noop:          test/scaffolding handler; returns its input.
+
+Manual switch (added with click-to-switch):
+- switch: validate the target against the pair's qualified candidates,
+  write a switch request file for the healer, and poll the healer's
+  result file until it answers. The hub never deploys: the healer is
+  the pair's only controller. A switch outcome (done / failed /
+  refused / unknown) is the job's output, not a job error — the job
+  itself only fails on infrastructure problems (no pair, no SSH,
+  request file unwritable). One worker thread means a long switch
+  (up to 10 minutes of polling) delays other jobs; switches are rare
+  and operator-initiated, so that trade is accepted.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+import uuid
 
 from . import healerctl
 from .ssh import executor_for_server
@@ -60,10 +72,55 @@ def _handle_noop(store, job, make_executor):
     return {"echo": job["input"]}
 
 
+def _handle_switch(store, job, make_executor):
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("job has no pair")
+    protocol = ((job.get("input") or {}).get("protocol") or "").strip()
+    if not protocol:
+        raise ValueError("switch job has no protocol")
+    current = (pair.get("current_protocol") or "").strip()
+    if protocol == current:
+        return {"status": "already", "from": current, "to": protocol,
+                "rolled_back": False, "detail": ""}
+    scores = pair.get("candidate_scores") or {}
+    if protocol not in scores or float(scores[protocol]) <= 0:
+        raise ValueError(
+            "protocol %s is not a qualified candidate for this pair" % protocol)
+    _, executor = _healer_executor(store, job, make_executor)
+    request_id = uuid.uuid4().hex
+    req = healerctl.request_switch(executor, protocol, request_id)
+    if not req.get("ok"):
+        raise RuntimeError("could not write switch request: %s" % req.get("error"))
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        res = healerctl.switch_result(executor, request_id)
+        if res is not None:
+            status = res.get("status")
+            output = {"status": status, "from": res.get("from"),
+                      "to": res.get("to"), "rolled_back": bool(res.get("rolled_back")),
+                      "detail": res.get("detail") or ""}
+            if status == "done":
+                store.update_pair_protocol(pair["id"], protocol)
+                store.log_event("switch", "Pair %s switched %s -> %s"
+                                % (pair["name"], res.get("from"), protocol),
+                                pair_id=pair["id"], data=res)
+            elif status in ("failed", "refused"):
+                store.log_event("switch", "Switch of pair %s to %s ended %s"
+                                % (pair["name"], protocol, status),
+                                pair_id=pair["id"], data=res)
+            return output
+        time.sleep(5)
+    return {"status": "unknown", "from": current, "to": protocol,
+            "rolled_back": False,
+            "detail": "healer did not report within 600 seconds"}
+
+
 HANDLERS = {
     "healer_status": _handle_healer_status,
     "connectivity": _handle_connectivity,
     "noop": _handle_noop,
+    "switch": _handle_switch,
 }
 
 

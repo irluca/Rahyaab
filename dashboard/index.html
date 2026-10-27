@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=11">
+<link rel="stylesheet" href="/static/style.css?v=12">
 </head>
 <body>
 <div id="auth-view" class="auth-wrap" hidden>
@@ -123,6 +123,14 @@
   </form>
 </dialog>
 
-<script src="/static/app.js?v=11"></script>
+<dialog id="switch-dialog">
+  <h3>سوییچ تانل؟</h3>
+  <p>از <b id="switch-from"></b> به <b id="switch-to"></b> سوییچ می‌شود.
+  تانل برای مدت کوتاهی قطع می‌شود (توقف تانل فعلی، استقرار تازه و راستی‌آزمایی سلامت).
+  اگر پروتکل تازه سالم نشد، خودکار به پروتکل قبلی برمی‌گردد.</p>
+  <div class="dialog-actions"><button type="button" id="switch-confirm">سوییچ</button><button type="button" id="switch-cancel">لغو</button></div>
+</dialog>
+
+<script src="/static/app.js?v=12"></script>
 </body>
 </html>

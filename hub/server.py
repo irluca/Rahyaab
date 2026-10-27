@@ -308,6 +308,16 @@ class Hub:
             raise ApiError(400, "this job type needs a pair_id")
         return self.store.create_job(job_type, pair_id, body.get("input") or {})
 
+    def switch_pair(self, pair_id: int, body: dict) -> dict:
+        """Queue a manual switch job; the job handler validates the target."""
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        protocol = (body.get("protocol") or "").strip()
+        if not protocol:
+            raise ApiError(400, "protocol is required")
+        return self.store.create_job("switch", pair_id, {"protocol": protocol})
+
 
 _STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
@@ -440,6 +450,9 @@ def make_handler(hub: Hub, static_dir=None):
             m = re.fullmatch(r"/api/pairs/(\d+)/healer/(start|stop|restart)", path)
             if m and method == "POST":
                 return 200, hub.healer_action(int(m.group(1)), m.group(2)), None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/switch", path)
+            if m and method == "POST":
+                return 201, hub.switch_pair(int(m.group(1)), body), None, False
             m = re.fullmatch(r"/api/pairs/(\d+)/history", path)
             if m and method == "GET":
                 pair = hub.store.get_pair(int(m.group(1)))
