@@ -11,7 +11,10 @@
 #  نصب یک‌خطی، بدون داکر) — ولی کد، موتور و داشبورد کاملاً خود رهیاب است.
 #
 #  این اسکریپت فقط «میزبان» را آماده می‌کند: وابستگی‌ها، کد رهیاب،
-#  هاب/نود، BBR، فایروال و گواهی پنل. ساخت حساب اپراتور، افزودن سرورها،
+#  هاب/نود، BBR، فایروال و گواهی پنل — به‌علاوه کلید هاب: موقع نصب
+#  هاب، اگر کلیدی نباشد روی همین سرور ساخته می‌شود و با ‎--push-key
+#  می‌شود با پسورد یک‌باره روت نود، روی آن نود نصبش کرد (پسورد هیچ‌جا
+#  ذخیره نمی‌شود). ساخت حساب اپراتور، افزودن سرورها،
 #  بنچمارک و پیکربندی نگهبان بعد از نصب، از داخل خود داشبورد انجام
 #  می‌شود (مثل ویزارد راه‌اندازی Nexora) — اسکریپت هیچ رمز و حسابی
 #  نمی‌سازد و چیزی را جعل نمی‌کند.
@@ -31,7 +34,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 # پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -47,7 +50,12 @@ DOMAIN=""
 EMAIL=""
 CERT_PATH=""
 KEY_PATH=""
+HUB_KEY="$CONF_DIR/hub_key"
+HUB_PUB="$CONF_DIR/hub_key.pub"
 LOCAL_SRC=""
+NODE_HOST=""
+NODE_USER="root"
+NODE_PORT="22"
 BBR=0
 IP_CERT=0
 YES=0
@@ -116,10 +124,20 @@ usage() {
   bash install.sh --role hub --bbr --domain panel.example.com --email you@example.com
   bash install.sh --role hub --bbr --ip-cert
   bash install.sh --local /path/to/rahyaab --role hub
+  bash install.sh --push-key 203.0.113.20   نصب کلید هاب روی نود (پسورد روت نود یک بار پرسیده می‌شود، هیچ‌جا ذخیره نمی‌شود)
   bash install.sh --check-only        فقط بررسی پیش‌نیازها، بدون تغییر
+
+کلید هاب: موقع نصب هاب، اگر کلیدی نباشد روی همین سرور ساخته می‌شود
+(/etc/rahyaab/hub_key) و کلید موجود هیچ‌وقت بازنویسی نمی‌شود. هاب با
+همین کلید به نودها وصل می‌شود؛ برای اعتماد اول، یا کلید عمومی چاپ‌شده
+را دستی روی نود بگذارید، یا با --push-key و پسورد یک‌باره روت نود،
+نصبش کنید. پسورد فقط برای همان یک اتصال است و بعد دور انداخته می‌شود.
 
 گزینه‌ها:
   --role hub|node     نقش این سرور (هاب = داشبورد، نود = بدون داشبورد)
+  --push-key HOST     نصب کلید هاب روی نود با پسورد یک‌باره روت آن
+  --node-user USER    یوزر نود برای push-key (پیش‌فرض: root)
+  --node-port PORT    پورت SSH نود برای push-key (پیش‌فرض: 22)
   --bbr               فعال‌سازی BBR
   --domain DOMAIN     گواهی Let's Encrypt برای دامنه
   --email EMAIL       ایمیل certbot (برای --domain لازم است)
@@ -139,6 +157,9 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --role)     ROLE="$2"; shift 2 ;;
+            --push-key) NODE_HOST="$2"; shift 2 ;;
+            --node-user) NODE_USER="$2"; shift 2 ;;
+            --node-port) NODE_PORT="$2"; shift 2 ;;
             --domain)   DOMAIN="$2"; shift 2 ;;
             --email)    EMAIL="$2"; shift 2 ;;
             --cert)     CERT_PATH="$2"; shift 2 ;;
@@ -243,6 +264,117 @@ fetch_code() {
     mkdir -p "$DATA_DIR" "$CONF_DIR"
 }
 
+# ── کلید هاب ────────────────────────────────────────────────────
+# کلید هاب روی همین سرور ساخته و نگه داشته می‌شود؛ هیچ‌وقت به
+# گیت‌هاب پوش نمی‌شود و هیچ‌وقت پیش متا نیست. هاب با همین کلید به
+# نودها وصل می‌شود (رکورد هر سرور در داشبورد، اگر key_path نداشته
+# باشد، همین مسیر را پیش‌فرض می‌گیرد).
+ensure_hub_key() {
+    mkdir -p "$CONF_DIR"
+    if [ -f "$HUB_KEY" ] && [ -f "$HUB_PUB" ]; then
+        info "کلید هاب از قبل هست و دست نمی‌خورد: $HUB_KEY"
+    else
+        step "ساخت کلید هاب"
+        rm -f "$HUB_KEY" "$HUB_PUB"
+        ssh-keygen -t ed25519 -f "$HUB_KEY" -N "" -C "rahyaab-hub" >/dev/null \
+            || die "ساخت کلید هاب ناموفق بود"
+        chmod 600 "$HUB_KEY"
+        chmod 644 "$HUB_PUB"
+        ok "کلید هاب ساخته شد: $HUB_KEY"
+    fi
+    info "کلید عمومی هاب (برای کپی دستی روی نود، اگر نخواستی پسورد بدهی):"
+    cat "$HUB_PUB"
+    info "اثر انگشت: $(ssh-keygen -lf "$HUB_PUB" | awk '{print $2}')"
+}
+
+# نصب کلید عمومی هاب روی یک نود با پسورد یک‌باره روت آن نود.
+# پسورد فقط برای همین یک اتصال استفاده می‌شود؛ هیچ‌جا ذخیره، لاگ
+# یا چاپ نمی‌شود و بلافاصله بعد از اتصال از حافظه پاک می‌شود.
+# بعد از این، نود فقط با کلید هاب باز می‌شود و پسورد دیگر لازم نیست.
+# کلید هاست نود هم همان‌جا در /root/.ssh/known_hosts پین می‌شود
+# (ورودی کهنه همان هاست، مثل بعد از ریبیلد، اول پاک می‌شود).
+push_key() { # $1 = node host
+    local node="${1:-$NODE_HOST}"
+    [ -n "$node" ] || die "هاست نود لازم است (‎--push-key <host>‎)"
+    ensure_hub_key
+    if ! python3 -c "import paramiko" 2>/dev/null; then
+        step "نصب python3-paramiko برای اتصال یک‌باره"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq python3-paramiko \
+            || die "نصب paramiko ناموفق بود"
+    fi
+    local pass
+    echo "پسورد روت نود $node فقط همین یک بار پرسیده می‌شود و هیچ‌جا ذخیره نمی‌شود."
+    read -r -s -p "پسورد روت $node: " pass
+    echo
+    [ -n "$pass" ] || die "پسورد خالی داده شد"
+    step "نصب کلید هاب روی $node"
+    RAHYAAB_NODE_PASSWORD="$pass" HUB_KEY="$HUB_KEY" HUB_PUB="$HUB_PUB" \
+        NODE_HOST="$node" NODE_USER="$NODE_USER" NODE_PORT="$NODE_PORT" \
+        python3 - "$HUB_KEY" "$HUB_PUB" <<'PYEOF'
+import os, sys
+import paramiko
+key_path, pub_path = sys.argv[1], sys.argv[2]
+host = os.environ["NODE_HOST"]
+user = os.environ.get("NODE_USER") or "root"
+port = int(os.environ.get("NODE_PORT") or 22)
+pw = os.environ["RAHYAAB_NODE_PASSWORD"]
+pub = open(pub_path).read().strip()
+kh_path = "/root/.ssh/known_hosts"
+os.makedirs("/root/.ssh", exist_ok=True)
+c = paramiko.SSHClient()
+c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+c.connect(host, port, user, password=pw, timeout=20, banner_timeout=30,
+          auth_timeout=30, allow_agent=False, look_for_keys=False)
+# پین کلید هاست (ورودی کهنه همان هاست را اول دور بریز تا بعد از ریبیلد گیر نکند)
+rk = c.get_transport().get_remote_server_key()
+line = "%s %s %s" % (host, rk.get_name(), rk.get_base64())
+old = open(kh_path).read() if os.path.exists(kh_path) else ""
+kept = [l for l in old.splitlines() if not l.startswith(host + " ")]
+if line not in kept:
+    kept.append(line)
+open(kh_path, "w").write("\n".join(kept) + "\n")
+os.chmod(kh_path, 0o600)
+# افزودن کلید عمومی هاب (فقط اگر نباشد)
+sftp = c.open_sftp()
+try:
+    sftp.stat("/root/.ssh")
+except IOError:
+    sftp.mkdir("/root/.ssh")
+    sftp.chmod("/root/.ssh", 0o700)
+try:
+    cur = sftp.open("/root/.ssh/authorized_keys").read().decode()
+except IOError:
+    cur = ""
+if pub not in cur:
+    f = sftp.open("/root/.ssh/authorized_keys", "a")
+    f.write(pub + "\n")
+    f.close()
+    sftp.chmod("/root/.ssh/authorized_keys", 0o600)
+    print("hub key added to node")
+else:
+    print("hub key already present on node")
+c.close()
+# راستی‌آزمایی: ورود فقط با کلید، با سیاست رد هاست ناشناس
+c2 = paramiko.SSHClient()
+c2.load_system_host_keys()
+c2.load_host_keys(kh_path)
+c2.set_missing_host_key_policy(paramiko.RejectPolicy())
+c2.connect(host, port, user, key_filename=key_path, timeout=20,
+           banner_timeout=30, auth_timeout=30, allow_agent=False, look_for_keys=False)
+_, out, _ = c2.exec_command("echo rahyaab-key-ok")
+assert out.read().decode().strip() == "rahyaab-key-ok", "key-only login failed"
+c2.close()
+print("push-key-ok")
+PYEOF
+    local rc=$?
+    pass=""
+    unset RAHYAAB_NODE_PASSWORD
+    [ "$rc" -eq 0 ] || die "نصب کلید روی نود ناموفق بود"
+    ok "کلید هاب روی $node نصب و ورود فقط با کلید راستی‌آزمایی شد؛ پسورد دور انداخته شد"
+}
+
 # ── یونیت هاب ───────────────────────────────────────────────────
 write_hub_unit() { # $1=host $2=cert $3=key
     local host="$1" cert="$2" key="$3" tls_args=""
@@ -325,6 +457,7 @@ install_hub() {
     step "نصب هاب (داشبورد)"
     install_deps hub
     fetch_code
+    ensure_hub_key
     write_hub_unit "127.0.0.1" "" ""
     systemctl enable "$UNIT" >/dev/null 2>&1
     # نکته: enable --now یونیتِ در حال اجرا را ری‌استارت نمی‌کند؛ برای نصب دوباره
@@ -607,6 +740,7 @@ menu() {
         echo "  5) به‌روزرسانی کد رهیاب"
         echo "  6) نمایش وضعیت"
         echo "  7) حذف رهیاب"
+        echo "  8) نصب کلید هاب روی نود (با پسورد یک‌باره)"
         echo "  0) خروج"
         local c
         read -r -p "انتخاب: " c
@@ -631,6 +765,11 @@ menu() {
             5) update_code ;;
             6) show_status ;;
             7) uninstall ;;
+            8)
+                local node
+                read -r -p "هاست نود (آی‌پی یا دامنه): " node
+                push_key "$node"
+                ;;
             0) info "خدانگهدار"; return 0 ;;
             *) warn "انتخاب نامعتبر" ;;
         esac
@@ -644,6 +783,10 @@ main() {
     detect_os
     if [ "$CHECK_ONLY" -eq 1 ]; then
         check_only
+        return 0
+    fi
+    if [ -n "$NODE_HOST" ]; then
+        push_key "$NODE_HOST"
         return 0
     fi
     if [ -n "$ROLE" ]; then

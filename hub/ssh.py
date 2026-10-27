@@ -77,4 +77,6 @@ def executor_for_server(server: dict, fake: Executor | None = None) -> Executor:
     return ParamikoExecutor(
         host=server["host"], port=server.get("port") or 22,
         username=server.get("username") or "root",
-        key_path=server.get("key_path"))
+        # سروری که key_path ندارد، با کلید خود هاب وصل می‌شود؛ همان
+        # کلیدی که install.sh روی سرور هاب می‌سازد (/etc/rahyaab/hub_key)
+        key_path=server.get("key_path") or "/etc/rahyaab/hub_key")
