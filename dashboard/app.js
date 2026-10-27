@@ -80,8 +80,10 @@ function renderPairs() {
     const lastLat = lat.length ? lat[lat.length - 1].toFixed(1) + " ms" : "—";
     const lastThr = thr.length ? thr[thr.length - 1].toFixed(1) + " kbps" : "—";
     const scores = Object.entries(p.candidate_scores || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    const scoreRows = scores.length ? scores.map(([name, score]) =>
-      `<div class="score-row"><span class="ltr">${name}</span>${bar(score, "green")}<span class="ltr">${score}</span></div>`).join("")
+    const scoreChips = scores.length ? scores.map(([name, score]) => {
+      const active = p.current_protocol && name === p.current_protocol;
+      return `<span class="proto-chip ${active ? "on" : "off"}"><span class="proto-dot ${active ? "pulse" : ""}"></span><span class="ltr">${name}</span><b class="ltr">${score}</b></span>`;
+    }).join("")
       : '<p class="muted small">امتیازی ثبت نشده است.</p>';
     const iran = state.servers.find(s => s.id === p.iran_server_id);
     const foreign = state.servers.find(s => s.id === p.foreign_server_id);
@@ -104,7 +106,7 @@ function renderPairs() {
       </div>
       <p class="meta">مسیر داخلی: <span class="ltr">${p.inner_iran || "—"} ⇄ ${p.inner_foreign || "—"}</span></p>
       <div class="servers-mini">${serverMini(iran, "ایران")}${serverMini(foreign, "خارج")}</div>
-      <div class="chart-wrap score-wrap"><div class="muted small">امتیاز پروتکل‌ها (بنچمارک)</div>${scoreRows}</div>
+      <div class="score-wrap"><span class="muted small">امتیاز پروتکل‌ها:</span><div class="proto-chips">${scoreChips}</div></div>
       <div class="actions">
         <button class="act-btn green" data-act="refresh">↻ تازه‌سازی وضعیت</button>
         <button class="act-btn blue" data-act="restart">⟳ ری‌استارت نگهبان</button>

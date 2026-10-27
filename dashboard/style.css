@@ -209,6 +209,19 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .score-row { display: grid; grid-template-columns: 110px 1fr 52px; gap: 8px; align-items: center;
   font-size: 12px; margin: 5px 0; }
 .score-row .bar { margin: 0; }
+/* Protocol scores as one line of chips, no bars: a green blinking dot
+   marks the protocol carrying the tunnel right now, a red dot marks an
+   inactive one. The green light follows p.current_protocol on every
+   refresh, so after a failover it moves to the new protocol by itself. */
+.score-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.proto-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.proto-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--well);
+  border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12px; }
+.proto-chip b { font-weight: 800; }
+.proto-chip.on { border-color: #3ddc8455; }
+.proto-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
+.proto-chip.on .proto-dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.proto-dot.pulse { animation: pulse 2s infinite; }
 .server-card .meta { color: var(--muted); font-size: 13px; }
 .server-card h3 { margin: 0 0 4px; }
 
