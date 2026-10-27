@@ -3179,10 +3179,12 @@ class TestSupervisoryCompliance(unittest.TestCase):
                     if "openssl req -x509" in line:
                         san_lines += 1
                         self.assertIn("subjectAltName=IP:", line, f"{name}: {line.strip()[:110]}")
-        self.assertEqual(san_lines, 4, "chisel, frp, backhaul and gost each issue one serving "
+        self.assertEqual(san_lines, 6, "chisel, frp, backhaul and gost each issue one serving "
                                        "certificate (gost joined the list with F4, when its "
                                        "client stopped skipping verification and needed a "
-                                       "certificate worth pinning)")
+                                       "certificate worth pinning), plus install.sh's hub IP "
+                                       "certificate issued twice: initial issuance and the "
+                                       "auto-renewal script")
 
     def test_39_operational_data_stays_outside_the_repo(self):
         """BEST_TUNNEL_DB_PATH must move every live-session write out of the working tree.

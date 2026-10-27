@@ -59,3 +59,26 @@ panel — no configs, nodes or users, by any path.
   verified absent) and runbook in `docs/phase5-runbook.md`; push
   waits on the user creating the empty private repo and adding the
   VM deploy key. The v1.0 tag waits for Phase 4's live tests.
+
+## نصب روی سرور (install.sh)
+
+نصب‌کننده یک‌خطی و زیبای رهیاب که روی خود سرور اجرا می‌شود
+(با ایده از نصب‌کننده‌های BackPack و Kariz — منوی تعاملی، بدون داکر):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh)
+```
+
+منو: نصب هاب (داشبورد) یا نود (بدون داشبورد)، فعال‌سازی BBR،
+گواهی پنل (دامنه با Let's Encrypt و تمدید خودکار، آی‌پی با
+self-signed و تایمر تمدید خودکار، یا گواهی آماده خودتان)،
+به‌روزرسانی کد، نمایش وضعیت، حذف. مسیر غیرتعاملی هم دارد
+(`--role hub --bbr --domain panel.example.com --email you@example.com`
+یا `--role hub --bbr --ip-cert`) و با `--local` می‌شود از روی
+فایل‌های محلی نصب کرد (تا وقتی ریپوی فاز ۵ پوش نشده).
+
+نکته‌ها: اجرای دوباره امن است (دیتابیس و گواهی‌ها دست نمی‌خورند)؛
+ساخت حساب اپراتور، افزودن سرورها، بنچمارک و پیکربندی نگهبان از
+داخل داشبورد انجام می‌شود؛ اسکریپت به PasarGuard و به نگهبانِ در
+حال اجرا دست نمی‌زند. توجه: Let's Encrypt برای آی‌پی خالی گواهی
+نمی‌دهد، پس مسیر آی‌پی self-signed است (مرورگر بار اول هشدار می‌دهد).
