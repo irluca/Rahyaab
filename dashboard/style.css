@@ -209,28 +209,43 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .score-row { display: grid; grid-template-columns: 110px 1fr 52px; gap: 8px; align-items: center;
   font-size: 12px; margin: 5px 0; }
 .score-row .bar { margin: 0; }
-/* Protocol scores as one line of chips, no bars: a green blinking dot
-   marks the protocol carrying the tunnel right now, a red dot marks an
-   inactive one. The green light follows p.current_protocol on every
-   refresh, so after a failover it moves to the new protocol by itself. */
-.score-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Protocol scores as small cards: name on top, score below with a star
+   so the number reads as a score, and a switch key under each one. A
+   green blinking dot marks the protocol carrying the tunnel right now,
+   a red dot marks an inactive one. The green light follows
+   p.current_protocol on every refresh, so after a failover it moves to
+   the new protocol by itself. Rejected protocols are dimmed, dashed,
+   and have no key at all. */
+.score-wrap { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
 .proto-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-.proto-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--well);
-  border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12px;
-  color: var(--text); }
+.proto-chip { display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+  background: var(--well); border: 1px solid var(--line); border-radius: 14px;
+  padding: 8px 12px 9px; font-size: 12px; color: var(--text); }
 .proto-chip b { font-weight: 800; }
 .proto-chip.on { border-color: #3ddc8455; }
+.proto-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 800; }
 .proto-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
 .proto-chip.on .proto-dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .proto-dot.pulse { animation: pulse 2s infinite; }
-/* Clickable protocol chips (manual switch): same look as the spans,
-   plus a hover ring so they read as tappable. The active chip stays a
-   span and is never clickable. */
-button.proto-chip { cursor: pointer; font: inherit;
-  transition: transform .15s, border-color .15s, box-shadow .15s; }
-button.proto-chip:hover { transform: translateY(-1px); border-color: var(--accent);
-  box-shadow: 0 6px 16px #4ea8ff33; }
-button.proto-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.proto-score { font-size: 11px; color: var(--muted); direction: ltr; }
+.proto-score b { color: var(--text); }
+/* The switch key under each protocol card: an accent outline pill that
+   fills on hover. Only this key opens the switch dialog; the card
+   itself is not clickable. The active card shows a "connected" pill
+   instead of a key, and rejected cards show a dimmed "rejected" pill. */
+.switch-btn { margin-top: 3px; font: inherit; font-size: 11px; font-weight: 800;
+  color: var(--accent); background: transparent; border: 1px solid var(--accent);
+  border-radius: 999px; padding: 3px 14px; cursor: pointer; transition: all .15s; }
+.switch-btn:hover { background: var(--accent); color: #081120; }
+[data-theme="light"] .switch-btn:hover { color: #fff; }
+.switch-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.state-pill { margin-top: 3px; font-size: 11px; font-weight: 800;
+  border: 1px solid transparent; border-radius: 999px; padding: 3px 14px; }
+.state-pill.connected { color: var(--green); border-color: #3ddc8455; }
+.state-pill.rejected { color: var(--muted); border-style: dashed; border-color: var(--muted); }
+.proto-chip.rejected { opacity: .6; border-style: dashed; }
+.proto-chip.rejected .proto-dot { background: var(--muted); box-shadow: none; }
+.proto-chip.rejected .proto-score { direction: rtl; }
 .tunnel-box.switching .proto-chips { opacity: .55; pointer-events: none; }
 .switch-status { display: flex; align-items: center; gap: 8px; margin-top: 12px;
   font-size: 13px; color: var(--muted); }

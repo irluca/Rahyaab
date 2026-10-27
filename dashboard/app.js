@@ -6,6 +6,7 @@ let state = { servers: [], pairs: [], events: [], filter: "all", section: "overv
 
 let serverMetrics = {};
 let pairMetrics = {};
+let pairBenchmarks = {};
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -35,6 +36,11 @@ function badgeFor(st) {
 
 function protoClass(proto) {
   return proto === "GRE" ? "proto-GRE" : proto === "ESP" ? "proto-ESP" : "proto-other";
+}
+function rejectedReason(row) {
+  if ((row.loss_pct ?? 0) >= 100) return "قطعی ۱۰۰٪";
+  if ((row.dq_reasons || []).join(" ").includes("NOT_MEASURABLE")) return "گیت کریر";
+  return "رد شده در بنچمارک";
 }
 function metricFresh(m) {
   if (!m) return "unknown";
@@ -77,15 +83,31 @@ function renderPairs() {
     const thr = pm.filter(x => x.rx_kbps != null).map(x => x.rx_kbps + x.tx_kbps);
     const lastLat = lat.length ? lat[lat.length - 1].toFixed(1) + " ms" : "—";
     const lastThr = thr.length ? thr[thr.length - 1].toFixed(1) + " kbps" : "—";
-    const scores = Object.entries(p.candidate_scores || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    const scoreChips = scores.length ? scores.map(([name, score]) => {
+    // Every qualified protocol (score > 0) gets a card: dot + link emoji +
+    // name on top, star score below, and a switch key under it. The emoji
+    // sits left of the name (RTL flow: dot, name, emoji). The active card
+    // shows a "connected" pill instead of a key and is never clickable.
+    // Rejected protocols come from the live benchmark data: disqualified
+    // rows whose protocol is NOT in candidate_scores, so a protocol that
+    // is qualified by the morning sweep (ESP, wstunnel) never shows as
+    // rejected even if a later sweep could not measure it. Rejected cards
+    // are spans, never buttons, and the switch job would refuse them too.
+    const qualified = Object.entries(p.candidate_scores || {})
+      .filter(([, score]) => score > 0).sort((a, b) => b[1] - a[1]);
+    const scoreCards = qualified.map(([name, score]) => {
       const active = p.current_protocol && name === p.current_protocol;
-      const inner = `<span class="proto-dot ${active ? "pulse" : ""}"></span><span class="ltr">${name}</span><b class="ltr">${score}</b>`;
-      // The active chip stays a span; every other chip is a button that
-      // opens the switch confirm dialog. Same look, same size, same order.
-      return active ? `<span class="proto-chip on">${inner}</span>`
-        : `<button type="button" class="proto-chip off" data-proto="${name}">${inner}</button>`;
-    }).join("")
+      const head = `<span class="proto-name"><span class="proto-dot ${active ? "pulse" : ""}"></span><span class="ltr">${name}</span><span>🔗</span></span>`;
+      const foot = active ? `<span class="state-pill connected">متصل</span>`
+        : `<button type="button" class="switch-btn" data-proto="${name}">سوییچ</button>`;
+      return `<span class="proto-chip ${active ? "on" : ""}">${head}<span class="proto-score">⭐ <b>${score}</b></span>${foot}</span>`;
+    });
+    const rejected = (pairBenchmarks[p.id] || []).filter(r =>
+      r.disqualified && !(r.protocol in (p.candidate_scores || {})))
+      .sort((a, b) => a.protocol.localeCompare(b.protocol));
+    const rejectedCards = rejected.map(r =>
+      `<span class="proto-chip rejected"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">${r.protocol}</span><span>🔗</span></span><span class="proto-score">${rejectedReason(r)}</span><span class="state-pill rejected">رد شده</span></span>`);
+    const scoreChips = (scoreCards.length || rejectedCards.length)
+      ? scoreCards.concat(rejectedCards).join("")
       : '<p class="muted small">امتیازی ثبت نشده است.</p>';
     const iran = state.servers.find(s => s.id === p.iran_server_id);
     const foreign = state.servers.find(s => s.id === p.foreign_server_id);
@@ -128,10 +150,10 @@ function renderPairs() {
       await api("POST", `/api/pairs/${id}/healer/restart`);
       showBanner("دستور ری‌استارت نگهبان فرستاده شد.");
     };
-    card.querySelectorAll("button.proto-chip").forEach(chip => {
-      chip.onclick = () => {
+    card.querySelectorAll("button.switch-btn").forEach(btn => {
+      btn.onclick = () => {
         const pair = state.pairs.find(x => x.id === +id);
-        openSwitchDialog(+id, pair ? pair.current_protocol : "", chip.dataset.proto);
+        openSwitchDialog(+id, pair ? pair.current_protocol : "", btn.dataset.proto);
       };
     });
     // The 20-second auto-refresh re-renders cards mid-switch; keep the
@@ -239,6 +261,10 @@ async function loadAll() {
         try { const d = await api("GET", `/api/pairs/${pr.id}/metrics`); pairMetrics[pr.id] = d.metrics; }
         catch { pairMetrics[pr.id] = []; }
       }),
+      ...state.pairs.map(async pr => {
+        try { const d = await api("GET", `/api/pairs/${pr.id}/benchmarks`); pairBenchmarks[pr.id] = d.benchmarks || []; }
+        catch { pairBenchmarks[pr.id] = []; }
+      }),
     ]);
     renderCounters(); renderServerStrip(); renderPairs(); renderTables();
     $("#conn-dot").className = "dot ok"; $("#conn-text").textContent = "متصل به هاب";
@@ -254,7 +280,7 @@ function showBanner(msg, isError = false, ms = 6000) {
   setTimeout(() => b.hidden = true, ms);
 }
 
-// ---- manual switch (click a protocol chip) ------------------------------
+// ---- manual switch (click a protocol switch key) ------------------------------
 let activeSwitch = null;
 
 function markSwitching(card, to) {
