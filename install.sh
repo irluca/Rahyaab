@@ -226,9 +226,14 @@ fetch_code() {
         ok "کد از روی فایل‌های محلی کپی شد"
     else
         local url="https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}"
+        local auth_args=()
+        if [ -n "$GITHUB_TOKEN" ]; then
+            auth_args=(-H "Authorization: Bearer $GITHUB_TOKEN")
+        fi
         info "دانلود از $url"
-        curl -fsSL -o /tmp/rahyaab.tgz "$url" \
-            || die "دانلود ناموفق بود؛ اگر ریپو هنوز خصوصی/ساخته نشده، با --local یا --repo درستش بدهید"
+        if ! curl -fsSL "${auth_args[@]}" -o /tmp/rahyaab.tgz "$url"; then
+            die "دانلود ناموفق بود (گیت‌هاب برای ریپوی خصوصی بدون توکن ۴۰۴ می‌دهد). دو راه دارید: (۱) یک کپی از کد را با SCP روی سرور بگذارید و با --local <پوشه> نصب کنید؛ (۲) یک توکن خواندنی (fine-grained PAT، فقط همان ریپو) بسازید و با GITHUB_TOKEN=<توکن> همین دستور را دوباره بزنید. توکن را در فایل یا تاریخچه شل ذخیره نکنید."
+        fi
         tar -xzf /tmp/rahyaab.tgz --strip-components=1 -C "$INSTALL_DIR"
         rm -f /tmp/rahyaab.tgz
         ok "کد دانلود و باز شد"
