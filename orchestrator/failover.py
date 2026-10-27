@@ -472,7 +472,8 @@ class FailoverManager:
         This process's in-memory history is merged with the persisted audit events, because the
         breaker has to survive whatever restarts the process or rebuilds the manager: with memory
         alone, a pair that crash-loops across restarts met an empty window every time and was torn
-        down again without limit. Attempts that never touched the live units are not counted (see
+        down again without limit. Only completed switchovers count: a failed attempt ends on the
+        protocol it started on, so it never consumes the breaker's budget (see
         storage.recent_failover_events).
         """
         now = time.time()
@@ -600,14 +601,15 @@ class FailoverManager:
             }
 
         # Check circuit breaker — unless this execution IS the rollback of
-        # the switch that just failed: that switch's own smoke failure
-        # already recorded a failover event, so an unqualified check
-        # blocks the restoration and strands the pair with no working
-        # tunnel (2026-10-27: ESP -> hysteria2 smoke-failed, then its
-        # rollback to ESP was refused as "0.4s ago"). A rollback is a
-        # restoration, not a flap: it runs at most once per failed
-        # switch, and a successful one still records an event, so
-        # everything after it stays breaker-governed.
+        # the switch that just failed. A rollback is a restoration, not
+        # a flap: it runs at most once per failed switch, and a
+        # successful one still records an event, so everything after it
+        # stays breaker-governed. Without the exemption, a real move
+        # that happened just before the failure would refuse the
+        # restoration and strand the pair with no working tunnel
+        # (2026-10-27: ESP -> hysteria2 smoke-failed, then its rollback
+        # to ESP was refused as "0.4s ago" under the old rule that
+        # counted failures).
         if not is_rollback:
             is_flap, flap_msg = self.is_flapping(pair_id)
             if is_flap:

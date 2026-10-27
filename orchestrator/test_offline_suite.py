@@ -6038,7 +6038,7 @@ dM/5IlBnpCMejDaKAYLbcLo=
 
         storage.log_audit(pid, "FAILOVER", "SUCCESS", "first switchover")
         storage.log_audit(pid, "FAILOVER", "SUCCESS", "second switchover")
-        storage.log_audit(pid, "FAILOVER_FAILED", "SMOKE_ERROR", "third attempt broke the tunnel")
+        storage.log_audit(pid, "FAILOVER_FAILED", "SMOKE_ERROR", "third attempt failed, tunnel unmoved")
 
         # A brand new manager is what a restart - or the old per-request build - used to mean.
         revived = failover.FailoverManager(min_interval_seconds=180, max_failovers_per_window=3)
@@ -6046,22 +6046,37 @@ dM/5IlBnpCMejDaKAYLbcLo=
         self.assertTrue(blocked, "the breaker must remember across the process that forgot it")
         self.assertIn("Anti-flapping", why)
 
+        # The failed attempt ended on the protocol it started on, so it
+        # is not a flap and must not consume the window: two real moves
+        # do not trip a three-move limit, whichever process records
+        # them. A failed attempt is logged for visibility, never counted.
         counted = failover.FailoverManager(min_interval_seconds=0, max_failovers_per_window=3)
-        blocked2, why2 = counted.is_flapping(pid)
-        self.assertTrue(blocked2)
-        self.assertIn("Circuit Breaker TRIPPED", why2,
-                      "three attempts that disturbed service are the window limit, whichever process "
-                      "records them")
+        self.assertEqual(counted.is_flapping(pid), (False, ""),
+                         "a failed attempt must not block the next attempt")
 
         rows = storage.recent_failover_events(pid, 900)
-        self.assertEqual(len(rows), 3, "only the attempts that reached teardown count")
+        self.assertEqual(len(rows), 2, "only completed switchovers count")
         self.assertTrue(all(isinstance(t, float) for t in rows),
                         "the query returns timestamps, not detail text - no address travels this way")
         self.assertEqual(sorted(rows), rows,
                          "oldest first, so the newest is what anti-flapping measures")
 
+        # A third real move does trip the same limit. A fresh manager
+        # reads the persisted rows directly: reusing the manager above
+        # would merge the third row into its in-memory history under
+        # the 2 s dedup tolerance, since the test logs all three rows
+        # within the same seconds.
+        storage.log_audit(pid, "FAILOVER", "SUCCESS", "third switchover")
+        tripped = failover.FailoverManager(min_interval_seconds=0, max_failovers_per_window=3)
+        blocked3, why3 = tripped.is_flapping(pid)
+        self.assertTrue(blocked3)
+        self.assertIn("Circuit Breaker TRIPPED", why3,
+                      "three completed switchovers are the window limit, whichever process "
+                      "records them")
+
         # Refusals blocked no traffic, so they must not consume the breaker's budget: a pair that is
-        # merely being poked at must still be allowed its one real repair.
+        # merely being poked at must still be allowed its one real repair. A failed attempt is in
+        # the same class: it ended where it started.
         quiet = storage.add_pair(name=f"breaker-quiet-{int(time.time() * 1000)}",
                                  iran_host="198.51.100.10", foreign_host="203.0.113.20",
                                  frontend_port=9453)
@@ -6070,9 +6085,10 @@ dM/5IlBnpCMejDaKAYLbcLo=
         storage.log_audit(quiet, "FAILOVER_BLOCKED", "CARRIER_REFUSAL", "refused, nothing happened")
         storage.log_audit(quiet, "FAILOVER_ABORTED", "PLAN_ERROR", "aborted before teardown")
         storage.log_audit(quiet, "FAILOVER_NO_CANDIDATE", "ABORT", "no candidate")
+        storage.log_audit(quiet, "FAILOVER_FAILED", "SMOKE_ERROR", "failed, tunnel unmoved")
         self.assertEqual(failover.FailoverManager(min_interval_seconds=0,
                                                   max_failovers_per_window=1).is_flapping(quiet),
-                         (False, ""), "an attempt that never touched the hosts is not a failover")
+                         (False, ""), "an attempt that never moved the tunnel is not a failover")
 
         # The in-memory overlay and the audit row describe one switchover. Counting both would halve
         # every tolerance the breaker is configured with.

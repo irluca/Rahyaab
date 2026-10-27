@@ -1062,26 +1062,28 @@ def recent_security_events(pair_id: int, limit: int = 8) -> list[dict]:
         return [{**dict(row), "details": mask_addresses(row["details"])} for row in cur.fetchall()]
 
 def recent_failover_events(pair_id: int, window_seconds: float) -> list[float]:
-    """Timestamps (oldest first) of failover attempts that already disturbed the live tunnel.
+    """Timestamps (oldest first) of completed switchovers for the pair.
 
     The anti-flapping breaker kept its history inside a FailoverManager instance, so anything that
     built a new manager - a process restart, or the dashboard constructing one per request - reset the
     window to empty and a crash-looping pair could be torn down and rebuilt without limit. The audit
     log is the durable record, so the breaker reads from it.
 
-    Only attempts that reached the teardown stage are counted: FAILOVER/SUCCESS, and FAILOVER_FAILED
-    from the smoke check or an exception, both of which already interrupted service. A blocked or
-    plan-refused call never touched the live units, and counting those would let a burst of refused
-    requests trip the breaker the operator needs for a real outage. Returns timestamps only, never the
-    detail text, so no address can travel through this path.
+    Only a switchover that actually moved the tunnel counts: FAILOVER/SUCCESS. A failed attempt is
+    logged for visibility (FAILOVER_FAILED) but never counts, because it ends on the protocol it
+    started on - on the overlay-on-carrier path it never touches the live tunnel at all, and on the
+    teardown path the old transport is restored from quarantine. Counting failures let one harmless
+    failure block the next attempt for 180 s (2026-10-27: a smoke-failed wstunnel attempt refused
+    the backhaul attempt that followed it, while the pair sat healthy on chisel). A blocked or
+    plan-refused call likewise never moved the tunnel. Returns timestamps only, never the detail
+    text, so no address can travel through this path.
     """
     cutoff = time.time() - float(window_seconds)
     with db_session() as conn:
         cur = conn.execute("""
             SELECT created_at FROM audit_logs
              WHERE pair_id = ?
-               AND ((action = 'FAILOVER' AND status = 'SUCCESS')
-                 OR (action = 'FAILOVER_FAILED' AND status IN ('SMOKE_ERROR', 'EXCEPTION')))
+               AND action = 'FAILOVER' AND status = 'SUCCESS'
                AND created_at >= ?
              ORDER BY created_at ASC
         """, (pair_id, cutoff))
