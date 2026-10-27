@@ -38,10 +38,13 @@ script cannot invent trust between two strangers.
    BBR on the node. Fails cleanly if the node host key was never
    pinned (run push-key first).
 4. **Register in the hub DB** — servers (iran, foreign, healer=iran)
-   and the pair are written to the hub database (via `hub/store.py`),
-   so the dashboard shows them. Inner addresses default to
-   10.10.11.1 (Iran) / 10.10.11.2 (foreign), overridable by flags.
-   Later pairs take the next /24.
+   and the pair are written to the hub database by
+   `hub/wizard.py` (`python3 -m hub.wizard register --db
+   /var/lib/rahyaab/hub.db --iran-host X --foreign-host Y`), so the
+   dashboard shows them. Idempotent by pair name; server records
+   carry no key_path, so the hub uses its default hub key. Inner
+   addresses default to 10.10.11.1 (Iran) / 10.10.11.2 (foreign),
+   overridable by flags. Later pairs take the next /24.
 5. **First tunnel, honestly measured** — deploy GRE (the carrier
    that has measured best on this route in every sweep) via the
    engine, verify ping + L7, and record its real measurement as the

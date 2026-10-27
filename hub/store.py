@@ -260,6 +260,26 @@ class Store:
                 (protocol, pair_id),
             )
 
+    def update_pair_measurement(self, pair_id: int, candidate_scores: dict,
+                                current_protocol: str | None = None) -> None:
+        """Wizard step: record measured scores (never invented ones).
+
+        Replaces the whole candidate_scores map with the measured
+        values; a protocol never measured is absent, not zero.
+        """
+        with self._connect() as conn:
+            if current_protocol is not None:
+                conn.execute(
+                    "UPDATE pairs SET candidate_scores = ?, current_protocol = ?"
+                    " WHERE id = ?",
+                    (json.dumps(candidate_scores), current_protocol, pair_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE pairs SET candidate_scores = ? WHERE id = ?",
+                    (json.dumps(candidate_scores), pair_id),
+                )
+
     def list_healer_history(self, pair_id: int, limit: int = 200) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
