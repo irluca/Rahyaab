@@ -34,7 +34,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 # پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -54,6 +54,7 @@ HUB_KEY="$CONF_DIR/hub_key"
 HUB_PUB="$CONF_DIR/hub_key.pub"
 LOCAL_SRC=""
 NODE_HOST=""
+REMOTE_NODE=""
 NODE_USER="root"
 NODE_PORT="22"
 BBR=0
@@ -125,6 +126,7 @@ usage() {
   bash install.sh --role hub --bbr --ip-cert
   bash install.sh --local /path/to/rahyaab --role hub
   bash install.sh --push-key 203.0.113.20   نصب کلید هاب روی نود (پسورد روت نود یک بار پرسیده می‌شود، هیچ‌جا ذخیره نمی‌شود)
+  bash install.sh --remote-node 203.0.113.20   نصب نود روی سرور دیگر از همین سرور هاب (با کلید هاب؛ پیش‌نیاز: push-key)
   bash install.sh --check-only        فقط بررسی پیش‌نیازها، بدون تغییر
 
 کلید هاب: موقع نصب هاب، اگر کلیدی نباشد روی همین سرور ساخته می‌شود
@@ -136,6 +138,7 @@ usage() {
 گزینه‌ها:
   --role hub|node     نقش این سرور (هاب = داشبورد، نود = بدون داشبورد)
   --push-key HOST     نصب کلید هاب روی نود با پسورد یک‌باره روت آن
+  --remote-node HOST  نصب نود روی سرور دیگر از همین سرور هاب (پیش‌نیاز: push-key)
   --node-user USER    یوزر نود برای push-key (پیش‌فرض: root)
   --node-port PORT    پورت SSH نود برای push-key (پیش‌فرض: 22)
   --bbr               فعال‌سازی BBR
@@ -158,6 +161,7 @@ parse_args() {
         case "$1" in
             --role)     ROLE="$2"; shift 2 ;;
             --push-key) NODE_HOST="$2"; shift 2 ;;
+            --remote-node) REMOTE_NODE="$2"; shift 2 ;;
             --node-user) NODE_USER="$2"; shift 2 ;;
             --node-port) NODE_PORT="$2"; shift 2 ;;
             --domain)   DOMAIN="$2"; shift 2 ;;
@@ -383,6 +387,39 @@ PYEOF
     unset RAHYAAB_NODE_PASSWORD
     [ "$rc" -eq 0 ] || die "نصب کلید روی نود ناموفق بود"
     ok "کلید هاب روی $node نصب و ورود فقط با کلید راستی‌آزمایی شد؛ پسورد دور انداخته شد"
+}
+
+# نصب نود روی سرور دیگر، از همین سرور هاب، با کلید هاب.
+# پیش‌نیاز: push-key قبلاً برای آن نود اجرا شده باشد (کلید هاست پین
+# شده و کلید هاب روی نود نصب شده باشد)؛ وگرنه به‌جای پرسشِ معلق،
+# تمیز خطا می‌دهد. کد از همین /opt/rahyaab تاربال می‌شود، پس نیازی
+# به دانلود دوباره از گیت‌هاب نیست.
+install_node_remote() { # $1 = node host
+    local node="${1:-$REMOTE_NODE}"
+    [ -n "$node" ] || die "هاست نود لازم است (‎--remote-node <host>‎)"
+    ensure_hub_key
+    [ -d "$INSTALL_DIR" ] || die "کد رهیاب روی این سرور نیست؛ اول هاب را نصب کنید"
+    [ -f "$INSTALL_DIR/hub/main.py" ] || die "hub/main.py در $INSTALL_DIR نیست"
+    [ -f "$INSTALL_DIR/install.sh" ] || die "install.sh در $INSTALL_DIR نیست"
+    step "نصب نود روی $node از راه دور"
+    local tgz="/tmp/rahyaab-node.tgz"
+    (cd "$INSTALL_DIR" && tar --exclude=.git --exclude=__pycache__ --exclude='*.pyc' --exclude='*.bak-*' -czf "$tgz" .) \
+        || die "ساخت تاربال کد ناموفق بود"
+    scp -i "$HUB_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+        -o ConnectTimeout=20 -P "$NODE_PORT" "$tgz" "$INSTALL_DIR/install.sh" \
+        "$NODE_USER@$node:/tmp/" \
+        || die "ارسال به نود ناموفق بود؛ اول push-key را برای $node اجرا کنید"
+    ssh -i "$HUB_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+        -o ConnectTimeout=20 -p "$NODE_PORT" "$NODE_USER@$node" \
+        "rm -rf /tmp/rahyaab-src && mkdir -p /tmp/rahyaab-src && tar -xzf /tmp/rahyaab-node.tgz -C /tmp/rahyaab-src && bash /tmp/install.sh --role node --bbr --local /tmp/rahyaab-src --yes" \
+        || die "نصب نود روی $node ناموفق بود"
+    step "راستی‌آزمایی نود"
+    ssh -i "$HUB_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+        -o ConnectTimeout=20 -p "$NODE_PORT" "$NODE_USER@$node" \
+        "test -f /opt/rahyaab/hub/main.py && sysctl -n net.ipv4.tcp_congestion_control" \
+        || die "راستی‌آزمایی نود ناموفق بود"
+    rm -f "$tgz"
+    ok "نود روی $node نصب و راستی‌آزمایی شد"
 }
 
 # ── یونیت هاب ───────────────────────────────────────────────────
@@ -751,6 +788,7 @@ menu() {
         echo "  6) نمایش وضعیت"
         echo "  7) حذف رهیاب"
         echo "  8) نصب کلید هاب روی نود (با پسورد یک‌باره)"
+        echo "  9) نصب نود روی سرور دیگر از همین‌جا (با کلید هاب)"
         echo "  0) خروج"
         local c
         read -r -p "انتخاب: " c
@@ -780,6 +818,11 @@ menu() {
                 read -r -p "هاست نود (آی‌پی یا دامنه): " node
                 push_key "$node"
                 ;;
+            9)
+                local node
+                read -r -p "هاست نود (آی‌پی یا دامنه): " node
+                install_node_remote "$node"
+                ;;
             0) info "خدانگهدار"; return 0 ;;
             *) warn "انتخاب نامعتبر" ;;
         esac
@@ -797,6 +840,10 @@ main() {
     fi
     if [ -n "$NODE_HOST" ]; then
         push_key "$NODE_HOST"
+        return 0
+    fi
+    if [ -n "$REMOTE_NODE" ]; then
+        install_node_remote "$REMOTE_NODE"
         return 0
     fi
     if [ -n "$ROLE" ]; then
