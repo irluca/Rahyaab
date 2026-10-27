@@ -222,28 +222,6 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .proto-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
 .proto-chip.on .proto-dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .proto-dot.pulse { animation: pulse 2s infinite; }
-/* Protocol comparison: one horizontal bar chart per factor, protocols
-   as rows, two charts per row on desktop so the section stays compact. */
-.compare-block { background: var(--surface); border: 1px solid var(--line);
-  border-radius: 14px; padding: 14px 16px; margin-top: 14px; }
-.compare-block h3 { margin: 0 0 4px; font-size: 15px; }
-.compare-best { font-size: 12px; color: var(--muted); margin: 0 0 10px; line-height: 1.9; }
-.factor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 24px; }
-.factor-chart { margin: 10px 0; }
-.factor-chart h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
-.factor-row { display: grid; grid-template-columns: 110px 1fr 86px 56px; gap: 8px;
-  align-items: center; font-size: 12px; margin: 4px 0; padding: 3px 6px; border-radius: 8px; }
-.factor-row.is-active { background: #3ddc8414; outline: 1px solid #3ddc8455; }
-.factor-row.is-dq { opacity: 0.55; }
-.factor-row .bar { margin: 0; }
-.factor-row .val { text-align: left; }
-.factor-tag { font-size: 10px; background: var(--well); border: 1px solid var(--line);
-  border-radius: 999px; padding: 1px 7px; white-space: nowrap; }
-.factor-tag.hot { background: #3ddc8422; border-color: #3ddc8455; color: var(--green); }
-@media (max-width: 800px) {
-  .factor-grid { grid-template-columns: 1fr; }
-  .factor-row { grid-template-columns: 84px 1fr 72px 52px; }
-}
 .server-card .meta { color: var(--muted); font-size: 13px; }
 .server-card h3 { margin: 0 0 4px; }
 
