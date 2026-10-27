@@ -5,6 +5,26 @@ dashboard together install and do everything, with no Muse needed.
 The only trust bootstrap is one shared step, and it is honest: two
 servers that have never met cannot trust each other out of nothing.
 
+## One command (install.sh 1.3.0)
+
+On the hub server, as root:
+
+```bash
+bash install.sh --full-setup <node-host> --bbr --ip-cert --yes
+```
+
+(or menu item 10). Runs steps 1–7 in order. The node root password
+is asked once, in step 2, and never stored. If a pair with the same
+name is already set up (it has a current protocol), full-setup stops
+before anything destructive; an interrupted earlier run (no current
+protocol yet) can be resumed by running it again.
+
+Live proving: the chain has been tested piece by piece (remote-node
+install live; registration + measure/deploy/install chain offline
+with injected fakes). The end-to-end run happens on the operator's
+rebuild, never on a live production pair — deploying over a live
+pair would move its tunnel, so it is deliberately not tested there.
+
 ## The one trust step (unavoidable, and only once)
 
 Two options, the operator picks one at setup time:
@@ -39,7 +59,7 @@ script cannot invent trust between two strangers.
    pinned (run push-key first).
 4. **Register in the hub DB** — servers (iran, foreign, healer=iran)
    and the pair are written to the hub database by
-   `hub/wizard.py` (`python3 -m hub.wizard register --db
+   `hub/wizard.py` (`python3 -m hub.wizard --db
    /var/lib/rahyaab/hub.db --iran-host X --foreign-host Y`), so the
    dashboard shows them. Idempotent by pair name; server records
    carry no key_path, so the hub uses its default hub key. Inner

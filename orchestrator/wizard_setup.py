@@ -188,3 +188,29 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
         "healer_active": install.get("active"),
         "healer_heartbeat": install.get("heartbeat"),
     }
+
+
+def main(argv=None) -> int:
+    """CLI for install.sh's full-setup: prints the summary as JSON."""
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description="Rahyaab setup wizard: measure, deploy, install healer")
+    parser.add_argument("--iran-host", required=True)
+    parser.add_argument("--foreign-host", required=True)
+    parser.add_argument("--pair-id", type=int, required=True)
+    parser.add_argument("--pair-name", default="جفت اصلی")
+    parser.add_argument("--hub-db", default="/var/lib/rahyaab/hub.db")
+    parser.add_argument("--hub-key", default="/etc/rahyaab/hub_key")
+    parser.add_argument("--frontend-port", type=int, default=443)
+    parser.add_argument("--protocol", default=DEFAULT_PROTOCOL)
+    args = parser.parse_args(argv)
+    summary = run_setup(
+        args.iran_host, args.foreign_host, args.pair_id, args.pair_name,
+        args.hub_db, args.hub_key, frontend_port=args.frontend_port,
+        protocol=args.protocol)
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -34,7 +34,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 # پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -55,6 +55,10 @@ HUB_PUB="$CONF_DIR/hub_key.pub"
 LOCAL_SRC=""
 NODE_HOST=""
 REMOTE_NODE=""
+FULL_SETUP_NODE=""
+IRAN_HOST=""
+PAIR_NAME="جفت اصلی"
+PROTOCOL="GRE"
 NODE_USER="root"
 NODE_PORT="22"
 BBR=0
@@ -127,6 +131,7 @@ usage() {
   bash install.sh --local /path/to/rahyaab --role hub
   bash install.sh --push-key 203.0.113.20   نصب کلید هاب روی نود (پسورد روت نود یک بار پرسیده می‌شود، هیچ‌جا ذخیره نمی‌شود)
   bash install.sh --remote-node 203.0.113.20   نصب نود روی سرور دیگر از همین سرور هاب (با کلید هاب؛ پیش‌نیاز: push-key)
+  bash install.sh --full-setup 203.0.113.20 --bbr --ip-cert   راه‌اندازی کامل: هاب + نود + جفت + تانل اول + نگهبان (پسورد روت نود یک بار پرسیده می‌شود)
   bash install.sh --check-only        فقط بررسی پیش‌نیازها، بدون تغییر
 
 کلید هاب: موقع نصب هاب، اگر کلیدی نباشد روی همین سرور ساخته می‌شود
@@ -139,6 +144,10 @@ usage() {
   --role hub|node     نقش این سرور (هاب = داشبورد، نود = بدون داشبورد)
   --push-key HOST     نصب کلید هاب روی نود با پسورد یک‌باره روت آن
   --remote-node HOST  نصب نود روی سرور دیگر از همین سرور هاب (پیش‌نیاز: push-key)
+  --full-setup HOST   راه‌اندازی کامل دو سرور (هاب + نود + جفت + تانل اول + نگهبان)
+  --iran-host IP      آی‌پی سرور هاب برای full-setup (پیش‌فرض: تشخیص خودکار)
+  --pair-name NAME    نام جفت برای full-setup (پیش‌فرض: جفت اصلی)
+  --protocol PROTO    پروتکل تانل اول برای full-setup (پیش‌فرض: GRE)
   --node-user USER    یوزر نود برای push-key (پیش‌فرض: root)
   --node-port PORT    پورت SSH نود برای push-key (پیش‌فرض: 22)
   --bbr               فعال‌سازی BBR
@@ -162,6 +171,10 @@ parse_args() {
             --role)     ROLE="$2"; shift 2 ;;
             --push-key) NODE_HOST="$2"; shift 2 ;;
             --remote-node) REMOTE_NODE="$2"; shift 2 ;;
+            --full-setup) FULL_SETUP_NODE="$2"; shift 2 ;;
+            --iran-host) IRAN_HOST="$2"; shift 2 ;;
+            --pair-name) PAIR_NAME="$2"; shift 2 ;;
+            --protocol) PROTOCOL="$2"; shift 2 ;;
             --node-user) NODE_USER="$2"; shift 2 ;;
             --node-port) NODE_PORT="$2"; shift 2 ;;
             --domain)   DOMAIN="$2"; shift 2 ;;
@@ -420,6 +433,66 @@ install_node_remote() { # $1 = node host
         || die "راستی‌آزمایی نود ناموفق بود"
     rm -f "$tgz"
     ok "نود روی $node نصب و راستی‌آزمایی شد"
+}
+
+# راه‌اندازی کامل دو سرور از همین سرور هاب: نصب هاب + BBR + گواهی +
+# push-key + نصب نود از راه دور + ثبت جفت در دیتابیس هاب + زنجیره
+# اندازه‌گیری/استقرار/نصب نگهبان (wizard_setup.run_setup).
+# پسورد روت نود فقط در قدم push-key پرسیده می‌شود و هیچ‌جا ذخیره نمی‌شود.
+# قدم زنجیره چند دقیقه طول می‌کشد (بنچمارک + استقرار + نصب نگهبان).
+# محافظ: اگر جفتی با همین نام از قبل راه‌اندازی شده باشد (پروتکل جاری
+# دارد)، پیش از هر تغییر مخربی متوقف می‌شود؛ راه‌اندازیِ ناتمامِ قبلی
+# (بدون پروتکل جاری) را می‌شود با اجرای دوباره ادامه داد.
+full_setup() { # $1 = node host
+    local node="${1:-$FULL_SETUP_NODE}"
+    [ -n "$node" ] || die "هاست نود لازم است (‎--full-setup <host>‎)"
+    local iran_ip="$IRAN_HOST"
+    if [ -z "$iran_ip" ]; then
+        iran_ip="$(public_ip)"
+    fi
+    [ -n "$iran_ip" ] && [ "$iran_ip" != "نامشخص" ] \
+        || die "آی‌پی این سرور پیدا نشد؛ با ‎--iran-host بدهید"
+    if [ "$YES" -eq 0 ]; then
+        ask IRAN_HOST "آی‌پی این سرور (هاب/ایران)" "$iran_ip"
+        iran_ip="$IRAN_HOST"
+    fi
+    step "۱) نصب هاب روی این سرور"
+    install_hub
+    if [ "$BBR" -eq 1 ]; then enable_bbr; fi
+    if [ -n "$DOMAIN" ]; then cert_domain; fi
+    if [ "$IP_CERT" -eq 1 ]; then cert_ip; fi
+    if [ -n "$CERT_PATH" ]; then cert_custom; fi
+    step "۲) نصب کلید هاب روی نود (پسورد یک‌باره پرسیده می‌شود)"
+    push_key "$node"
+    step "۳) نصب نود روی $node از راه دور"
+    install_node_remote "$node"
+    step "۴) ثبت سرورها و جفت در دیتابیس هاب"
+    local pair_json pair_id pair_protocol
+    pair_json="$(cd "$INSTALL_DIR" && python3 -m hub.wizard --db "$HUB_DB" --iran-host "$iran_ip" --foreign-host "$node" --pair-name "$PAIR_NAME")" \
+        || die "ثبت جفت در دیتابیس هاب ناموفق بود"
+    pair_id="$(echo "$pair_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')" \
+        || die "خواندن شناسه جفت ناموفق بود"
+    pair_protocol="$(echo "$pair_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("current_protocol") or "")')"
+    if [ -n "$pair_protocol" ]; then
+        die "جفت «$PAIR_NAME» قبلاً راه‌اندازی شده (پروتکل جاری: $pair_protocol)؛ برای جفت تازه نامی دیگر بدهید"
+    fi
+    info "جفت ثبت شد (شناسه $pair_id)"
+    step "۵) اندازه‌گیری، استقرار تانل اول و نصب نگهبان"
+    local setup_json setup_score setup_status panel_url
+    setup_json="$(python3 "$INSTALL_DIR/orchestrator/wizard_setup.py" --iran-host "$iran_ip" --foreign-host "$node" --pair-id "$pair_id" --pair-name "$PAIR_NAME" --hub-db "$HUB_DB" --hub-key "$HUB_KEY" --frontend-port 443 --protocol "$PROTOCOL")" \
+        || die "زنجیره راه‌اندازی ناموفق بود؛ خروجی بالا را ببینید"
+    setup_score="$(echo "$setup_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["score"])')"
+    setup_status="$(echo "$setup_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["deploy_status"])')"
+    if [ -n "$DOMAIN" ]; then panel_url="https://$DOMAIN:$HUB_PORT"; else panel_url="https://$iran_ip:$HUB_PORT"; fi
+    echo
+    echo "╔══════════════════════════════════════════════════════╗"
+    echo "║  راه‌اندازی کامل شد                                   ║"
+    echo "║  جفت: $PAIR_NAME                                      ║"
+    echo "║  تانل اول: $PROTOCOL (امتیاز $setup_score، وضعیت $setup_status) ║"
+    echo "║  داشبورد: $panel_url                                 ║"
+    echo "║  قدم بعدی: در صفحه راه‌اندازی داشبورد، حساب اپراتور  ║"
+    echo "║  را بسازید. این اسکریپت به PasarGuard دست نمی‌زند.    ║"
+    echo "╚══════════════════════════════════════════════════════╝"
 }
 
 # ── یونیت هاب ───────────────────────────────────────────────────
@@ -789,6 +862,7 @@ menu() {
         echo "  7) حذف رهیاب"
         echo "  8) نصب کلید هاب روی نود (با پسورد یک‌باره)"
         echo "  9) نصب نود روی سرور دیگر از همین‌جا (با کلید هاب)"
+        echo "  10) راه‌اندازی کامل دو سرور (ویزارد: هاب + نود + تانل + نگهبان)"
         echo "  0) خروج"
         local c
         read -r -p "انتخاب: " c
@@ -823,6 +897,16 @@ menu() {
                 read -r -p "هاست نود (آی‌پی یا دامنه): " node
                 install_node_remote "$node"
                 ;;
+            10)
+                local node pair
+                read -r -p "هاست نود (آی‌پی یا دامنه): " node
+                read -r -p "نام جفت [جفت اصلی]: " pair
+                FULL_SETUP_NODE="$node"
+                PAIR_NAME="${pair:-جفت اصلی}"
+                BBR=1
+                IP_CERT=1
+                full_setup "$node"
+                ;;
             0) info "خدانگهدار"; return 0 ;;
             *) warn "انتخاب نامعتبر" ;;
         esac
@@ -844,6 +928,10 @@ main() {
     fi
     if [ -n "$REMOTE_NODE" ]; then
         install_node_remote "$REMOTE_NODE"
+        return 0
+    fi
+    if [ -n "$FULL_SETUP_NODE" ]; then
+        full_setup "$FULL_SETUP_NODE"
         return 0
     fi
     if [ -n "$ROLE" ]; then

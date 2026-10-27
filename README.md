@@ -63,6 +63,14 @@ bash /tmp/install-rahyaab.sh --role hub --bbr --domain panel.example.com --email
 bash /tmp/install-rahyaab.sh --role node --bbr --yes                                              # node (no dashboard)
 ```
 
+**Full setup — two raw servers, one command, no Muse needed.** On the hub server, as root:
+
+```bash
+bash /tmp/install-rahyaab.sh --full-setup <node-host> --bbr --ip-cert --yes
+```
+
+This installs the hub, enables BBR, issues the panel certificate, installs the hub key on the node (the node's root password is asked once and never stored), installs the node remotely, registers the pair, measures and deploys the first tunnel (GRE), and installs the healer on top of it. After it finishes, open the dashboard and create the operator account — that step stays in the dashboard, and the installer never creates accounts or touches PasarGuard.
+
 Then open **https://YOUR-SERVER-IP:8890**, create the operator account (setup form, shown only because no account exists yet), add servers, run a benchmark, create a pair, and enable the healer. Re-running the installer is safe: the database and existing certificates are never overwritten.
 
 **Notes:** Let's Encrypt does not issue certificates for bare IPs, so the IP path is self-signed (the browser warns once; the fingerprint is printed by the installer for comparison) with a daily timer that renews it before expiry. A private fork needs `GITHUB_TOKEN` (a read-only fine-grained PAT) for the download path, or `--local` with an uploaded copy of the code.
