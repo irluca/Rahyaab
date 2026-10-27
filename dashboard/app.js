@@ -44,7 +44,7 @@ function lineChart(vals, color) {
   const d = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
   const area = d + ` L${pts[pts.length - 1][0].toFixed(1)} ${h - pad} L${pts[0][0].toFixed(1)} ${h - pad} Z`;
   const last = pts[pts.length - 1];
-  const grid = [24, 48, 72].map(y => `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="#ffffff10" stroke-width="1"/>`).join("");
+  const grid = [24, 48, 72].map(y => `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`).join("");
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}`
     + `<path d="${area}" fill="${color}" opacity="0.20"/>`
     + `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>`
@@ -128,8 +128,8 @@ function renderPairs() {
         <div class="chart-wrap"><div class="muted small">تأخیر تانل (ms، پینگ واقعی روی آدرس داخلی)</div>${lineChart(lat, "var(--accent)")}</div>
         <div class="chart-wrap"><div class="muted small">توان تانل (kbps، شمارنده واقعی اینترفیس)</div>${lineChart(thr, "var(--green)")}</div>
       </div>
-      <div class="chart-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${lineChart(hist.map(x => x.healthy ? 1 : 0), "var(--teal)")}</div>
-      <div class="chart-wrap"><div class="muted small">امتیاز پروتکل‌ها (بنچمارک)</div>${scoreRows}</div>
+      <div class="chart-wrap health-wrap"><div class="muted small">سلامت نگهبان در طول زمان</div>${lineChart(hist.map(x => x.healthy ? 1 : 0), "var(--teal)")}</div>
+      <div class="chart-wrap score-wrap"><div class="muted small">امتیاز پروتکل‌ها (بنچمارک)</div>${scoreRows}</div>
       <div class="actions">
         <button class="act-btn green" data-act="refresh">↻ تازه‌سازی وضعیت</button>
         <button class="act-btn blue" data-act="restart">⟳ ری‌استارت نگهبان</button>
