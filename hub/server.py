@@ -32,7 +32,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from . import auth, healerctl, metrics
+from . import auth, healerctl, join, metrics
 from .jobs import HANDLERS, Worker
 from .ssh import executor_for_server
 from .store import Store
@@ -171,6 +171,23 @@ class Hub:
             auth.hash_token(token), user["id"],
             time.time() + auth.SESSION_TTL_SECONDS)
         return token
+
+    def join_node(self, body: dict, ip: str) -> dict:
+        """Node join endpoint: token-gated, no login required.
+
+        The token is the credential (single successful use); the
+        node's address is the request's source IP, never typed.
+        """
+        try:
+            result = join.join_node(self.store, body, ip)
+        except join.JoinError as exc:
+            raise ApiError(exc.status, str(exc))
+        return {
+            "server": _public_server(result["server"]),
+            "pair": _public_pair(result["pair"]),
+            "job": result["job"],
+            "hub_pubkey": result["hub_pubkey"],
+        }
 
     def authenticate(self, token: str | None) -> dict:
         if not token:
@@ -413,6 +430,8 @@ def make_handler(hub: Hub, static_dir=None):
             if path == "/api/login" and method == "POST":
                 token = hub.login(body, self.client_address[0])
                 return 200, {"ok": True}, token, False
+            if path == "/api/join" and method == "POST":
+                return 201, hub.join_node(body, self.client_address[0]), None, False
             # Everything below needs a session.
             hub.authenticate(self._session_token())
             if path == "/api/logout" and method == "POST":

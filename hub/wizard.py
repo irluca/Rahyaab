@@ -54,6 +54,26 @@ def _find_or_create_server(store: Store, name: str, host: str) -> dict:
     })
 
 
+def register_self(db_path: str, host: str, name: str = "ایران") -> dict:
+    """Register the hub host itself as a server (master install step).
+
+    Idempotent by name; a changed host address updates the record, so
+    a master that moved IPs does not leave a stale self-record.
+    """
+    store = Store(db_path)
+    for server in store.list_servers():
+        if server["name"] == name:
+            if server["host"] != host:
+                store.update_server_host(server["id"], host,
+                                         server.get("port") or 22)
+                return store.get_server(server["id"])
+            return server
+    return store.create_server({
+        "name": name, "host": host, "port": 22,
+        "username": "root", "key_path": None, "notes": "wizard-master",
+    })
+
+
 def register_pair(db_path: str, iran_host: str, foreign_host: str,
                   pair_name: str = "جفت اصلی",
                   iran_name: str = "ایران", foreign_name: str = "خارج",

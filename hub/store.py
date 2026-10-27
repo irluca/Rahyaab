@@ -188,6 +188,14 @@ class Store:
             row = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
             return dict(row) if row else None
 
+    def update_server_host(self, server_id: int, host: str, port: int = 22) -> None:
+        """Re-join case: a rebuilt node keeps its name but gets a new address."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE servers SET host = ?, port = ? WHERE id = ?",
+                (host, port, server_id),
+            )
+
     def list_servers(self) -> list[dict]:
         with self._connect() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM servers ORDER BY id")]

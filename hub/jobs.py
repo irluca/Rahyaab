@@ -21,6 +21,14 @@ Manual switch (added with click-to-switch):
   request file unwritable). One worker thread means a long switch
   (up to 10 minutes of polling) delays other jobs; switches are rare
   and operator-initiated, so that trade is accepted.
+
+Node join (added with the join flow):
+- full_setup: measure one protocol, deploy the first tunnel and
+  install the healer for a freshly joined pair, via the wizard chain
+  (orchestrator/wizard_setup.run_setup). Runs on the hub host
+  itself, so it needs no executor. A long chain (benchmark + deploy
+  + healer install) holds the single worker thread; joins are rare,
+  so that trade is accepted like the switch one.
 """
 
 from __future__ import annotations
@@ -116,11 +124,36 @@ def _handle_switch(store, job, make_executor):
             "detail": "healer did not report within 600 seconds"}
 
 
+def _handle_full_setup(store, job, make_executor):
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("full_setup job has no pair")
+    inp = job.get("input") or {}
+    import os
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.environ.setdefault("BEST_TUNNEL_DB_PATH", "/var/lib/rahyaab/wizard.db")
+    sys.path.insert(0, os.path.join(root, "orchestrator"))
+    import wizard_setup
+    result = wizard_setup.run_setup(
+        inp["iran_host"], inp["foreign_host"], pair["id"],
+        pair.get("name") or "", str(store.db_path),
+        inp.get("hub_key_path") or "/etc/rahyaab/hub_key",
+        frontend_port=int(inp.get("frontend_port") or 443),
+        protocol=inp.get("protocol") or "GRE")
+    store.log_event("full_setup",
+                    "Pair %s set up: %s (score %s)"
+                    % (pair["name"], result["protocol"], result["score"]),
+                    pair_id=pair["id"], data=result)
+    return result
+
+
 HANDLERS = {
     "healer_status": _handle_healer_status,
     "connectivity": _handle_connectivity,
     "noop": _handle_noop,
     "switch": _handle_switch,
+    "full_setup": _handle_full_setup,
 }
 
 
