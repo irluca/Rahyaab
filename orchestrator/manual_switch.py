@@ -13,7 +13,11 @@ breaker, quarantine restore, and a smoke check before the switch
 commits. Where the auto path cannot restore (a carrier predecessor has
 no quarantine), this module redeploys the previous protocol itself, so
 a failed manual switch still ends on a working tunnel whenever the
-previous protocol can be restored at all.
+previous protocol can be restored at all. That redeploy runs as a
+rollback (is_rollback=True), so the breaker cannot refuse it on the
+strength of the very switch it is undoing. Carrier -> overlay switches
+never need it: that path keeps the carrier as the underlay and reports
+restored without a redeploy.
 
 Request file (written by the hub, consumed by the healer):
     {"protocol": "ESP", "request_id": "<uuid>", "requested_at": <epoch>}
@@ -191,12 +195,21 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
                 return result
             # Carrier predecessor (and every exception path) has no
             # quarantine to restore from: redeploy the previous
-            # protocol explicitly, and report whether that worked.
+            # protocol explicitly, and report whether that worked. The
+            # redeploy is a rollback, so it bypasses the circuit
+            # breaker: the failed switch's own smoke failure already
+            # recorded a failover event, and an unqualified check would
+            # refuse the restoration and strand the pair (2026-10-27:
+            # ESP -> hysteria2 failed, then its rollback to ESP was
+            # refused as "0.4s ago"). Carrier -> overlay failures never
+            # reach here: that path keeps the carrier and reports
+            # restored without a redeploy.
             ir_runner, fr_runner = _runners(monitor, pair)
             try:
                 rollback = monitor.manager.execute_failover(
                     pair, target, current, reason="manual-rollback",
-                    ir_runner=ir_runner, fr_runner=fr_runner)
+                    ir_runner=ir_runner, fr_runner=fr_runner,
+                    is_rollback=True)
             finally:
                 _close(ir_runner, fr_runner)
             if rollback.get("success"):

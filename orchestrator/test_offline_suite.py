@@ -2354,6 +2354,101 @@ class TestSupervisoryCompliance(unittest.TestCase):
         self.assertTrue(res_blocked.get("blocked"))
         self.assertIn("Anti-flapping", res_blocked.get("reason"))
 
+    def test_underlay_switch_and_rollback_bypass(self):
+        """2026-10-27: carrier -> overlay keeps the carrier as the underlay; a rollback bypasses the breaker.
+
+        Fresh pair ids per scenario: the class shares one test database,
+        so a scenario must not read another scenario's (or test_28's)
+        persisted failover events through the breaker window.
+        """
+        # 1. A rollback bypasses the breaker; a normal switch stays governed.
+        mock_ir = mock_ssh.MockSSHClient(host_role="iran")
+        mock_fr = mock_ssh.MockSSHClient(host_role="foreign")
+        pair_rb = {
+            "id": 91,
+            "name": "rollback_test_pair",
+            "frontend_port": 443,
+            "iran": {"host": "198.51.100.10", "port": 22},
+            "foreign": {"host": "203.0.113.20", "port": 22},
+            "base_rtt_ms": 42.0,
+            "active_tunnel": "GRE"
+        }
+        mock_ir.state["services"]["best-tunnel-prod-p91-gre"] = "active"
+        mock_fr.state["services"]["best-tunnel-prod-p91-gre"] = "active"
+        mock_ir.state["listeners"][443] = "tunnel_client"
+        mock_ir.state["packet_loss"] = 0.0
+        mgr = failover.FailoverManager(min_interval_seconds=180, max_failovers_per_window=3)
+        res = mgr.execute_failover(pair_rb, "GRE", "wstunnel-v10", reason="Test tunnel failure", dry_run=True, ir_runner=mock_ir, fr_runner=mock_fr)
+        self.assertTrue(res["success"])
+        res_blocked = mgr.execute_failover(pair_rb, "wstunnel-v10", "rathole-noise", reason="Rapid secondary failure", dry_run=True, ir_runner=mock_ir, fr_runner=mock_fr)
+        self.assertFalse(res_blocked["success"])
+        self.assertTrue(res_blocked.get("blocked"))
+        self.assertIn("Anti-flapping", res_blocked.get("reason"))
+        # The same switch, as the rollback of the switch that just
+        # failed, is NOT breaker-blocked: the failed switch's own event
+        # is what the unqualified check would refuse on.
+        res_rb = mgr.execute_failover(pair_rb, "wstunnel-v10", "rathole-noise", reason="manual-rollback", dry_run=True, ir_runner=mock_ir, fr_runner=mock_fr, is_rollback=True)
+        self.assertTrue(res_rb["success"])
+        self.assertEqual(res_rb["new_protocol"], "rathole-noise")
+
+        # 2. Carrier -> overlay: the carrier is never torn down.
+        mock_ir2 = RecordingRunner(host_role="iran")
+        mock_fr2 = RecordingRunner(host_role="foreign")
+        pair_ov = {
+            "id": 92,
+            "name": "overlay_test_pair",
+            "frontend_port": 443,
+            "iran": {"host": "198.51.100.10", "port": 22},
+            "foreign": {"host": "203.0.113.20", "port": 22},
+            "base_rtt_ms": 42.0,
+            "active_tunnel": "GRE"
+        }
+        mock_ir2.state["services"]["best-tunnel-prod-p92-gre"] = "active"
+        mock_fr2.state["services"]["best-tunnel-prod-p92-gre"] = "active"
+        mock_ir2.state["listeners"][443] = "tunnel_client"
+        mock_ir2.state["packet_loss"] = 0.0
+        mgr2 = failover.FailoverManager(min_interval_seconds=180, max_failovers_per_window=3)
+        res2 = mgr2.execute_failover(pair_ov, "GRE", "frp-TLS", reason="Test overlay on carrier", dry_run=True, ir_runner=mock_ir2, fr_runner=mock_fr2)
+        self.assertTrue(res2["success"])
+        self.assertEqual(res2["new_protocol"], "frp-TLS")
+        # The carrier unit stayed up, its interface was never deleted,
+        # and its unit was never stopped: only the two frontend DNAT
+        # deletes moved, which is the whole cutover.
+        self.assertEqual(mock_ir2.state["services"].get("best-tunnel-prod-p92-gre"), "active")
+        self.assertEqual(mock_ir2.state["services"].get("best-tunnel-prod-p92-frps"), "active")
+        self.assertNotIn("ip tunnel del grep92", mock_ir2.issued())
+        self.assertNotIn("systemctl stop best-tunnel-prod-p92-gre", mock_ir2.issued())
+
+        # 3. Peel: an overlay back to its live underlay carrier.
+        mock_ir3 = mock_ssh.MockSSHClient(host_role="iran")
+        mock_fr3 = mock_ssh.MockSSHClient(host_role="foreign")
+        tun_ir3, tun_fr3 = protocols.carrier_inner_pair("GRE", 93, "prod")
+        pair_peel = {
+            "id": 93,
+            "name": "peel_test_pair",
+            "frontend_port": 443,
+            "iran": {"host": "198.51.100.10", "port": 22, "dial_host": tun_ir3},
+            "foreign": {"host": "203.0.113.20", "port": 22, "dial_host": tun_fr3},
+            "base_rtt_ms": 42.0,
+            "active_tunnel": "frp-TLS",
+            "underlay_carrier": "gre"
+        }
+        mock_ir3.state["services"]["best-tunnel-prod-p93-frps"] = "active"
+        mock_fr3.state["services"]["best-tunnel-prod-p93-frpc"] = "active"
+        mock_ir3.state["services"]["best-tunnel-prod-p93-gre"] = "active"
+        mock_fr3.state["services"]["best-tunnel-prod-p93-gre"] = "active"
+        mock_ir3.state["packet_loss"] = 0.0
+        mock_ir3.state["prerouting"] = [
+            f"-A PREROUTING -p tcp ! -i grep93 --dport 443 -m comment --comment best-tunnel-93-prod-GRE -j DNAT --to-destination {tun_fr3}:443",
+            f"-A PREROUTING -p udp ! -i grep93 --dport 443 -m comment --comment best-tunnel-93-prod-GRE -j DNAT --to-destination {tun_fr3}:443",
+        ]
+        mgr3 = failover.FailoverManager(min_interval_seconds=180, max_failovers_per_window=3)
+        res3 = mgr3.execute_failover(pair_peel, "frp-TLS", "GRE", reason="Test peel", dry_run=True, ir_runner=mock_ir3, fr_runner=mock_fr3)
+        self.assertTrue(res3["success"])
+        self.assertEqual(res3["new_protocol"], "GRE")
+        self.assertEqual(mock_ir3.state["services"].get("best-tunnel-prod-p93-frps"), "inactive")
+        self.assertEqual(mock_ir3.state["services"].get("best-tunnel-prod-p93-gre"), "active")
+
     def test_29_auth_cache_ttl_and_bearer_auth(self):
         """Auditor report041 §2.1 Acceptance Test: 15-minute AUTH_CACHE TTL eviction, manual flush, and Bearer auth."""
         # 1. Test TTL eviction
@@ -8752,7 +8847,10 @@ dM/5IlBnpCMejDaKAYLbcLo=
         check("deploy rollback", [ir_a, fr_a],
               set(plan["teardown_iran"]) | set(plan["teardown_foreign"]))
 
-        # (b) a switchover away from the carrier, whose Stage 3 tears the carrier down mid-flight.
+        # (b) a switchover away from the carrier to another carrier,
+        # whose Stage 3 tears the carrier down mid-flight. (A switch
+        # to an overlay keeps the carrier as its underlay instead, so
+        # it stops no carrier unit and cannot carry this check.)
         pid_b = storage.add_pair(name=f"esp_budget_{int(time.time() * 1000)}", iran_host=ir_ip,
                                  foreign_host=fr_ip, frontend_port=8443)
         self.addCleanup(storage.delete_pair, pid_b)
@@ -8762,7 +8860,7 @@ dM/5IlBnpCMejDaKAYLbcLo=
         ir_b, fr_b = _BudgetRunner(host_role="iran"), _BudgetRunner(host_role="foreign")
         mgr = failover.FailoverManager(min_interval_seconds=0, max_failovers_per_window=50,
                                        window_seconds=3600)
-        res = mgr.execute_failover(pair_b, "ESP", "chisel-wss", reason="budget check",
+        res = mgr.execute_failover(pair_b, "ESP", "GRE", reason="budget check",
                                    dry_run=False, ir_runner=ir_b, fr_runner=fr_b)
         self.assertTrue(res.get("success"), f"fixture: the switchover did not reach its teardown: {res}")
         check("failover stage 3", [ir_b, fr_b],

@@ -396,6 +396,59 @@ def refresh_auto_choice(pair_id: int, current_protocol: str, pair: dict = None) 
     return winner
 
 
+def _underlay_protocol(pair: dict, current_protocol: str) -> str | None:
+    """The carrier underneath the current transport, if any.
+
+    The declared underlay first (set by engine.declare_carrier on a
+    carrier's success path, cleared by retract_carrier when the envelope
+    goes); a current carrier is its own underlay. An overlay with no
+    declaration names nothing: guessing 'gre' here would tear down a
+    carrier the pair may not have, so an undeclared overlay simply has
+    no underlay for switch purposes.
+    """
+    declared = (pair.get("underlay_carrier") or "").strip().lower()
+    if declared in ("gre", "esp"):
+        return declared.upper()
+    if current_protocol in protocols.CARRIER_PROTOCOLS:
+        return current_protocol
+    return None
+
+
+def _carrier_dnat_cmds(cmds: list[str]) -> list[str]:
+    """The carrier frontend's PREROUTING DNAT commands (tcp + udp) from a plan's command list.
+
+    Both carriers build exactly two: one per protocol, forwarding the
+    frontend to the peer's inner address. Filtering on the two tokens
+    rather than the full rule keeps this true for GRE and ESP alike
+    without duplicating either generator's template.
+    """
+    return [c for c in cmds if "PREROUTING" in c and "DNAT" in c]
+
+
+def _manifest_dnat_rows(rows: list[str]) -> list[str]:
+    """Manifest rows (R|table|PREROUTING|verb|pos|spec) that install a DNAT.
+
+    The carrier's firewall manifest is what its unit re-applies on boot,
+    so a cutover that only deletes the live rules would be undone by the
+    next reboot, re-shadowing the overlay. These rows are the ones a
+    cutover drops from the manifest and a peel puts back.
+    """
+    out = []
+    for row in rows:
+        parts = row.split("|")
+        if len(parts) == 6 and parts[0] == "R" and parts[2] == "PREROUTING" and "DNAT" in parts[5]:
+            out.append(row)
+    return out
+
+
+def _carrier_manifest_path(plan: dict) -> str | None:
+    """The carrier manifest file path from its plan, or None if the plan has none."""
+    for key in plan.get("iran_files", {}):
+        if key.endswith("-fw.rules"):
+            return key
+    return None
+
+
 class FailoverManager:
     """Orchestrates staged switchover, anti-flapping hysteresis, and circuit breaker."""
 
@@ -458,7 +511,7 @@ class FailoverManager:
     def execute_failover(self, pair: dict, current_protocol: str, target_protocol: str,
                          reason: str, dry_run: bool = False,
                          ir_runner=None, fr_runner=None,
-                         quarantine: bool = True) -> dict:
+                         quarantine: bool = True, is_rollback: bool = False) -> dict:
         """Switches a pair from current_protocol to target_protocol.
 
         This is NOT zero-downtime and NOT make-before-break: Stage 3 stops the old units
@@ -473,6 +526,34 @@ class FailoverManager:
         a rollback in seconds, not a redeploy. A successful switchover
         leaves the record until the grace window expires, when the
         monitor's purge finally runs the stored teardown.
+
+        is_rollback: this execution restores the transport that was
+        healthy before the switch being undone. It skips the circuit
+        breaker check: the failed switch itself recorded a failover
+        event (its smoke failure already interrupted service), so an
+        unqualified check blocks the very restoration the breaker exists
+        to protect and strands the pair with no working tunnel
+        (2026-10-27: ESP -> hysteria2 smoke-failed, then its rollback to
+        ESP was refused as "0.4s ago"). A rollback is a restoration,
+        not a flap: it runs at most once per failed switch, all other
+        gates still apply, and a successful rollback still records a
+        failover event, so everything after it stays breaker-governed.
+
+        Underlay switches: when the current transport is a carrier and
+        the target is an overlay, the carrier is KEPT as the underlay.
+        The overlay is deployed first (it dials through the carrier
+        inners), smoke-checked, and only then does the carrier's
+        frontend DNAT move aside so client traffic reaches the overlay's
+        listener; the carrier interface, its peer route and its firewall
+        manifest stay, minus the two DNAT rows, so a reboot cannot
+        re-shadow the overlay. A failed overlay deploy leaves the
+        carrier untouched, so there is nothing to roll back. When the
+        current transport is an overlay riding an underlay and the
+        target is a carrier, the cheap path peels the overlay off and
+        restores the underlay's DNAT (verified by inner reachability);
+        if the underlay is dead, the switch falls through to a full
+        redeploy of the carrier, tearing the dead underlay down first
+        so the fresh deploy starts clean.
         """
         pair_id = pair.get("id", 1)
         frontend = pair.get("frontend_port", pair.get("frontend", 443))
@@ -518,16 +599,25 @@ class FailoverManager:
                 "attempted_protocol": target_protocol
             }
 
-        # Check circuit breaker
-        is_flap, flap_msg = self.is_flapping(pair_id)
-        if is_flap:
-            storage.log_audit(pair_id, "FAILOVER_BLOCKED", "CIRCUIT_BREAKER", flap_msg)
-            return {
-                "success": False,
-                "blocked": True,
-                "reason": flap_msg,
-                "current_protocol": current_protocol
-            }
+        # Check circuit breaker — unless this execution IS the rollback of
+        # the switch that just failed: that switch's own smoke failure
+        # already recorded a failover event, so an unqualified check
+        # blocks the restoration and strands the pair with no working
+        # tunnel (2026-10-27: ESP -> hysteria2 smoke-failed, then its
+        # rollback to ESP was refused as "0.4s ago"). A rollback is a
+        # restoration, not a flap: it runs at most once per failed
+        # switch, and a successful one still records an event, so
+        # everything after it stays breaker-governed.
+        if not is_rollback:
+            is_flap, flap_msg = self.is_flapping(pair_id)
+            if is_flap:
+                storage.log_audit(pair_id, "FAILOVER_BLOCKED", "CIRCUIT_BREAKER", flap_msg)
+                return {
+                    "success": False,
+                    "blocked": True,
+                    "reason": flap_msg,
+                    "current_protocol": current_protocol
+                }
 
         created_ir = (ir_runner is None)
         created_fr = (fr_runner is None)
@@ -552,6 +642,22 @@ class FailoverManager:
             raise
 
         try:
+            # Peel: the current transport is an overlay riding an
+            # underlay, and the target is that underlay carrier. The
+            # carrier never left — its interface and peer route are
+            # still there — so try the cheap path first. A None result
+            # means the underlay is dead: fall through to the full
+            # redeploy below, which tears the dead underlay down first.
+            _underlay = _underlay_protocol(pair, current_protocol)
+            if (current_protocol not in protocols.CARRIER_PROTOCOLS
+                    and target_protocol in protocols.CARRIER_PROTOCOLS
+                    and _underlay == target_protocol):
+                _peeled = self._peel_to_underlay(
+                    pair, plan_for, current_protocol, target_protocol,
+                    reason, dry_run, ir_runner, fr_runner, t_start)
+                if _peeled is not None:
+                    return _peeled
+
             # Stage 1: Generate the successor plan BEFORE touching the live deployment, so a
             # generation or validation failure aborts without having caused an outage.
             try:
@@ -615,6 +721,19 @@ class FailoverManager:
                             "attempted_protocol": target_protocol
                         }
 
+            # Overlay on a live carrier: the current transport is the
+            # envelope the target dials through, so tearing it down
+            # first is what made every carrier -> overlay switch fail
+            # its smoke check. Deploy the overlay first (client traffic
+            # keeps flowing through the carrier DNAT meanwhile), smoke
+            # it, and only then move the DNAT aside. A failed overlay
+            # leaves the carrier untouched: restored without a rollback.
+            if (current_protocol in protocols.CARRIER_PROTOCOLS
+                    and target_protocol not in protocols.CARRIER_PROTOCOLS):
+                return self._overlay_on_carrier(
+                    pair, plan_for, new_plan, current_protocol, target_protocol,
+                    reason, dry_run, ir_runner, fr_runner, t_start)
+
             # Stage 2: Stage new files to disk with strict 0600 permissions.
             #
             # The parent directory is created by the writer rather than left to the plan's own setup
@@ -639,7 +758,29 @@ class FailoverManager:
             # it is seeing.
             old_plan = plan_for(current_protocol)
             quarantined = None
-            if quarantine and current_protocol not in protocols.INNER_PROBED:
+            _underlay = _underlay_protocol(pair, current_protocol)
+            if (current_protocol not in protocols.INNER_PROBED
+                    and target_protocol in protocols.CARRIER_PROTOCOLS
+                    and _underlay):
+                # Leaving an overlay for a carrier: the overlay's
+                # underlay must go too, or the fresh carrier deploys
+                # over a dead envelope — and the overlay must be torn
+                # down, not quarantined, because its restore would ride
+                # that dead envelope. (The peel above already tried the
+                # cheap path when the target IS the underlay; reaching
+                # here means the underlay is dead, or the target is a
+                # different carrier.)
+                for cmd in old_plan.get("teardown_iran", []):
+                    ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+                for cmd in old_plan.get("teardown_foreign", []):
+                    fr_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+                _underlay_plan = plan_for(_underlay)
+                for cmd in _underlay_plan.get("teardown_iran", []):
+                    ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+                for cmd in _underlay_plan.get("teardown_foreign", []):
+                    fr_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+                engine.retract_carrier(pair_id, _underlay, dry_run)
+            elif quarantine and current_protocol not in protocols.INNER_PROBED:
                 # Quarantine instead of teardown: the units stop (so the
                 # frontend frees) but their files and configs stay, and the
                 # teardown that would delete them is stored, not run.
@@ -795,6 +936,224 @@ class FailoverManager:
                 ir_runner.close()
             if created_fr and hasattr(fr_runner, "close"):
                 fr_runner.close()
+
+    def _manifest_set_dnat(self, ir_runner, carrier_plan, protocol, pair_id, keep):
+        """Drop (keep=False) or restore (keep=True) the carrier's DNAT rows in its firewall manifest.
+
+        The manifest is what the carrier unit re-applies on boot. A
+        cutover that leaves the rows behind is undone by the next
+        reboot, re-shadowing the overlay; a peel that leaves them out
+        loses the DNAT on the next reboot. A missing manifest (a deploy
+        from before manifests) is not an error: there is nothing a
+        reboot would restore, so the live rules are the whole story.
+        Returns False only when a manifest was read but could not be
+        written back — the caller treats that as a failed cutover
+        rather than leaving a reboot time-bomb.
+        """
+        path = _carrier_manifest_path(carrier_plan)
+        if not path:
+            return True
+        _, content, _ = ir_runner.run(f"cat {path}", best_effort=True)
+        if not content.strip():
+            return True
+        comment = protocols.generate_firewall_comment(f"{pair_id}-prod", protocol)
+        try:
+            rows = protocols.fw_manifest_rows(carrier_plan.get("iran_cmds", []), comment)
+        except Exception:
+            return True
+        dnat_rows = _manifest_dnat_rows(rows)
+        if not dnat_rows:
+            return True
+        lines = content.splitlines()
+        if keep:
+            new_lines = lines + [r for r in dnat_rows if r not in lines]
+        else:
+            new_lines = [ln for ln in lines if ln not in dnat_rows]
+        if new_lines == lines:
+            return True
+        try:
+            ir_runner.write_file(path, "\n".join(new_lines) + "\n")
+        except Exception:
+            return False
+        return True
+
+    def _peel_to_underlay(self, pair, plan_for, current_protocol, target_protocol,
+                          reason, dry_run, ir_runner, fr_runner, t_start):
+        """Peel an overlay off its live underlay carrier; None to fall through to a full redeploy.
+
+        The carrier never left: its interface and peer route are still
+        there, so the cheap path is stop the overlay, restore the
+        carrier's frontend DNAT (live rules + manifest rows, so a
+        reboot keeps it), and verify the carrier answers on its inners.
+        Success commits like any failover. A dead carrier (no inner
+        reply, or the DNAT not back in force) returns None: the caller
+        falls through to a full redeploy of the carrier, which tears
+        the dead underlay down first. Never returns a failure: a peel
+        that cannot verify must not strand the pair on a verdict — the
+        redeploy path is the honest next step.
+        """
+        pair_id = pair.get("id", 1)
+        frontend = pair.get("frontend_port", pair.get("frontend", 443))
+        try:
+            old_plan = plan_for(current_protocol)
+            carrier_plan = plan_for(target_protocol)
+        except Exception:
+            return None
+        for cmd in old_plan.get("teardown_iran", []):
+            ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+        for cmd in old_plan.get("teardown_foreign", []):
+            fr_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+        # Restore the frontend DNAT the overlay's cutover removed. The
+        # check-then-add keeps a half-restored chain from doubling a rule.
+        for add in _carrier_dnat_cmds(carrier_plan.get("iran_cmds", [])):
+            check = add.replace("-A PREROUTING", "-C PREROUTING", 1)
+            ir_runner.run(f"{check} || {add}", best_effort=True)
+        self._manifest_set_dnat(ir_runner, carrier_plan, target_protocol, pair_id, keep=True)
+        reached, _ = engine.carrier_inner_reachable(ir_runner, target_protocol, pair_id)
+        _, o_nat, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True)
+        inner_peer = protocols.carrier_inner_pair(target_protocol, pair_id, "prod")[1]
+        dnat_in_force = f"--to-destination {inner_peer}:{frontend}" in o_nat
+        if not reached or not dnat_in_force:
+            return None
+        duration_ms = round((time.time() - t_start) * 1000.0, 1)
+        self.record_failover_event(pair_id)
+        storage.update_pair_status(pair_id, status="ACTIVE", active_tunnel=target_protocol)
+        engine.declare_carrier(pair_id, target_protocol, dry_run)
+        storage.log_audit(
+            pair_id, "FAILOVER", "SUCCESS",
+            f"Successfully failed over {current_protocol} -> {target_protocol} in {duration_ms}ms. "
+            f"Trigger: {reason} (peeled to live underlay)"
+        )
+        return {
+            "success": True,
+            "old_protocol": current_protocol,
+            "new_protocol": target_protocol,
+            "duration_ms": duration_ms,
+            "reason": reason,
+            "quarantined": None
+        }
+
+    def _overlay_on_carrier(self, pair, plan_for, new_plan, current_protocol, target_protocol,
+                            reason, dry_run, ir_runner, fr_runner, t_start):
+        """Deploy an overlay on top of the live carrier; the carrier is never torn down.
+
+        Order is the whole design: the overlay deploys and smoke-checks
+        while client traffic still flows through the carrier DNAT, and
+        only then does the DNAT move aside, so the cutover itself has
+        no gap. A failed overlay is torn down and the carrier — never
+        touched — keeps serving: restored=True with no rollback needed.
+        A cutover that cannot be verified (a DNAT rule still in force,
+        or the manifest not updated) is reverted the same way rather
+        than leaving a half-moved frontend or a reboot time-bomb.
+        """
+        pair_id = pair.get("id", 1)
+        frontend = pair.get("frontend_port", pair.get("frontend", 443))
+
+        def _teardown_overlay():
+            for cmd in new_plan.get("teardown_iran", []):
+                ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+            for cmd in new_plan.get("teardown_foreign", []):
+                fr_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+
+        def _failed(detail):
+            _teardown_overlay()
+            return {
+                "success": False,
+                "error": detail,
+                "restored": True,
+                "current_protocol": current_protocol,
+                "attempted_protocol": target_protocol
+            }
+
+        # Stage 2/4/5 for the overlay only: files, setup, units. The
+        # carrier's units, interface and rules are not touched here.
+        for fpath, content in new_plan.get("iran_files", {}).items():
+            ir_runner.write_file(fpath, content)
+        for fpath, content in new_plan.get("foreign_files", {}).items():
+            fr_runner.write_file(fpath, content)
+        for cmd in new_plan.get("iran_cmds", []):
+            ir_runner.run(cmd, check=True)
+        for cmd in new_plan.get("foreign_cmds", []):
+            fr_runner.run(cmd, check=True)
+        if new_plan.get("foreign_units"):
+            fr_runner.run("systemctl daemon-reload", check=True)
+            for u in new_plan["foreign_units"]:
+                fr_runner.run(f"systemctl enable --now {u}", check=True)
+        if new_plan.get("iran_units"):
+            ir_runner.run("systemctl daemon-reload", check=True)
+            for u in new_plan["iran_units"]:
+                ir_runner.run(f"systemctl enable --now {u}", check=True)
+
+        # Smoke: the same verdict the main flow holds an overlay to —
+        # units up, then (live only) a real L7 round trip through the
+        # peer channel the carrier inners just gave it.
+        smoke_ok = True
+        smoke_detail = ""
+        for u in new_plan.get("iran_units", []):
+            _, o_st, _ = ir_runner.run(f"systemctl is-active {u}", best_effort=True)
+            if o_st.strip() != "active":
+                smoke_ok = False
+                smoke_detail = f"unit {u} reported '{o_st.strip()}'"
+                break
+        if smoke_ok and not dry_run:
+            if not probe.ensure_probe(ir_runner):
+                smoke_ok = False
+                smoke_detail = "L7 probe could not be installed on Iran"
+            else:
+                time.sleep(2)
+                _, o_smoke, _ = ir_runner.run(probe.cmd("lat", "127.0.0.1", frontend),
+                                              best_effort=True,
+                                              timeout=probe.cmd_timeout("lat"))
+                if not re.search(r'AVG:([0-9.]+)', o_smoke):
+                    smoke_ok = False
+                    smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
+                                    f"(probe output: {o_smoke.strip()[:60]!r})")
+        if not smoke_ok:
+            err_msg = f"Smoke verification failed for replacement protocol {target_protocol}: {smoke_detail}"
+            storage.log_audit(pair_id, "FAILOVER_FAILED", "SMOKE_ERROR", err_msg)
+            return _failed(err_msg)
+
+        # Cutover: move the carrier's frontend DNAT aside, live rules
+        # and manifest together, so client traffic reaches the
+        # overlay's listener — and a reboot cannot move it back.
+        try:
+            carrier_plan = plan_for(current_protocol)
+        except Exception as plan_err:
+            return _failed(f"Failed to generate carrier plan for cutover: {plan_err}")
+        for cmd in _carrier_dnat_cmds(carrier_plan.get("teardown_iran", [])):
+            ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+        if not self._manifest_set_dnat(ir_runner, carrier_plan, current_protocol, pair_id, keep=False):
+            # Manifest read but not writable: revert the live cutover
+            # rather than leave a reboot that re-shadows the overlay.
+            for add in _carrier_dnat_cmds(carrier_plan.get("iran_cmds", [])):
+                check = add.replace("-A PREROUTING", "-C PREROUTING", 1)
+                ir_runner.run(f"{check} || {add}", best_effort=True)
+            return _failed("carrier firewall manifest could not be updated for cutover")
+        if not dry_run:
+            _, o_nat, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True)
+            inner_peer = protocols.carrier_inner_pair(current_protocol, pair_id, "prod")[1]
+            if f"--to-destination {inner_peer}:{frontend}" in o_nat:
+                for add in _carrier_dnat_cmds(carrier_plan.get("iran_cmds", [])):
+                    check = add.replace("-A PREROUTING", "-C PREROUTING", 1)
+                    ir_runner.run(f"{check} || {add}", best_effort=True)
+                self._manifest_set_dnat(ir_runner, carrier_plan, current_protocol, pair_id, keep=True)
+                return _failed("carrier frontend DNAT still in force after cutover")
+        duration_ms = round((time.time() - t_start) * 1000.0, 1)
+        self.record_failover_event(pair_id)
+        storage.update_pair_status(pair_id, status="ACTIVE", active_tunnel=target_protocol)
+        storage.log_audit(
+            pair_id, "FAILOVER", "SUCCESS",
+            f"Successfully failed over {current_protocol} -> {target_protocol} in {duration_ms}ms. "
+            f"Trigger: {reason} (overlay on live {current_protocol} underlay)"
+        )
+        return {
+            "success": True,
+            "old_protocol": current_protocol,
+            "new_protocol": target_protocol,
+            "duration_ms": duration_ms,
+            "reason": reason,
+            "quarantined": None
+        }
 
     def purge_quarantine(self, pair: dict, dry_run: bool = False,
                          ir_runner=None, fr_runner=None) -> bool:

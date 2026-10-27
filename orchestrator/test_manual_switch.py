@@ -78,10 +78,12 @@ class StubManager:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
         self.calls = []
+        self.rollback_flags = []
 
     def execute_failover(self, pair, current, target, reason,
-                         ir_runner=None, fr_runner=None):
+                         ir_runner=None, fr_runner=None, is_rollback=False):
         self.calls.append((current, target, reason))
+        self.rollback_flags.append(is_rollback)
         return self.outcomes.pop(0)
 
 
@@ -165,6 +167,19 @@ def test_switch_smoke_fail_without_quarantine_redeploys_previous(tmp_path):
     assert out["status"] == "failed" and out["rolled_back"] is True
     assert monitor.manager.calls == [("GRE", "ESP", "manual-switch"),
                                      ("ESP", "GRE", "manual-rollback")]
+    # The redeploy is a rollback, so it must bypass the breaker: the
+    # failed switch's own smoke failure already recorded a failover
+    # event, and an unqualified check would refuse the restoration
+    # (2026-10-27: ESP -> hysteria2 failed, then its rollback to ESP
+    # was refused as "0.4s ago"). The switch itself stays governed.
+    assert monitor.manager.rollback_flags == [False, True]
+
+
+def test_normal_switch_does_not_bypass_breaker(tmp_path):
+    monitor = StubMonitor(StubManager([{"success": True}]))
+    out, _ = _run(monitor, "ESP", tmp_path)
+    assert out["status"] == "done"
+    assert monitor.manager.rollback_flags == [False]
 
 
 def test_switch_and_rollback_both_fail(tmp_path):
