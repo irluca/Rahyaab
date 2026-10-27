@@ -217,12 +217,12 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
    Below 901px the card keeps its vertical layout. */
 @media (min-width: 901px) {
   .tunnel-box { display: grid;
-    grid-template-columns: 250px minmax(0, 1fr) minmax(0, 1.15fr);
+    grid-template-columns: 300px minmax(0, 1fr) minmax(0, 1.2fr);
     grid-template-areas:
       "head servers charts"
       "meta scores health"
       "actions actions actions";
-    gap: 12px 18px; align-items: start; }
+    gap: 16px 22px; align-items: start; }
   .tunnel-box > .tunnel-head { grid-area: head; flex-direction: column; align-items: flex-start; gap: 10px; }
   .tunnel-box > .meta { grid-area: meta; margin: 0; }
   .tunnel-box > .servers-mini { grid-area: servers; grid-template-columns: 1fr; margin-top: 0; }
@@ -232,11 +232,29 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
   .tunnel-box > .actions { grid-area: actions; margin-top: 2px; }
   .tunnel-box::after { grid-column: 1 / -1; }
   .tunnel-box .chart-wrap { margin-top: 0; }
-  .tunnel-box .chart-wrap svg { height: 72px; }
+  .tunnel-box .chart-wrap svg { height: 120px; }
+  .tunnel-box .bar { height: 10px; }
   .tunnel-box .tunnel-kpis { margin-inline-start: 0; width: 100%; }
   .tunnel-box .kpi { flex: 1; min-width: 0; padding: 8px 10px; }
   .tunnel-box .kpi b { font-size: 19px; }
   .tunnel-box .score-row { font-size: 12px; }
+  /* Desktop stays generous while phones stay compact: bigger top
+     boxes, stat cards and rings, and a centered content column so
+     very wide screens do not stretch the dashboard thin. */
+  .main { max-width: 1600px; margin-inline: auto; width: 100%; }
+  .counter { padding: 14px 16px; }
+  .counter b { font-size: 28px; }
+  .counter span { font-size: 13px; }
+  .stat-card { padding: 20px; }
+  .stat-chip { width: 48px; height: 48px; }
+  .stat-chip svg { width: 24px; height: 24px; }
+  .stat-value { font-size: 30px; }
+  .server-strip-item { padding: 9px 16px; font-size: 13px; }
+  .status-ring { width: 64px; height: 64px; }
+  .tunnel-title h3 { font-size: 24px; }
+  .tunnel-box .kpi b { font-size: 24px; }
+  .server-mini { padding: 16px; }
+  .section h2 { margin: 24px 0 14px; }
 }
 
 table { width: 100%; border-collapse: collapse; background: var(--surface);
