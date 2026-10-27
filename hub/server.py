@@ -288,6 +288,14 @@ class Hub:
                              pair_id=pair_id, data=result)
         return result
 
+    def pair_benchmarks(self, pair_id: int) -> list[dict]:
+        """Latest benchmark row per protocol, read from the healer DB."""
+        from . import benchmarks
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        return benchmarks.latest_benchmarks(pair["name"])
+
     # -- jobs ------------------------------------------------------------------
     def create_job(self, body: dict) -> dict:
         job_type = body.get("type") or ""
@@ -450,6 +458,10 @@ def make_handler(hub: Hub, static_dir=None):
                 if hub.store.get_pair(int(m.group(1))) is None:
                     raise ApiError(404, "pair not found")
                 return 200, {"metrics": hub.store.list_pair_metrics(
+                    int(m.group(1)))}, None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/benchmarks", path)
+            if m and method == "GET":
+                return 200, {"benchmarks": hub.pair_benchmarks(
                     int(m.group(1)))}, None, False
             if path == "/api/jobs" and method == "GET":
                 return 200, {"jobs": hub.store.list_jobs()}, None, False

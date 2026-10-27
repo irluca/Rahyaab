@@ -1,13 +1,14 @@
 /* Rahyaab dashboard logic — plain JS, no libraries, no build step.
-   Every number on screen comes from the hub API. Charts draw only
-   from /api/pairs/{id}/history; with no history points the chart
-   area says so instead of inventing a line. */
+   Every number on screen comes from the hub API. The protocol
+   comparison draws only from /api/pairs/{id}/benchmarks; a factor
+   that was never recorded renders as a dash, never as zero. */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 let state = { servers: [], pairs: [], events: [], filter: "all", section: "overview" };
 
 let serverMetrics = {};
 let pairMetrics = {};
+let pairBenchmarks = {};
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -214,6 +215,87 @@ function renderCounters() {
   $$("#counter-strip .counter").forEach(b => b.classList.toggle("active", b.dataset.filter === state.filter));
 }
 
+/* Protocol comparison: one horizontal bar chart per factor, protocols
+   as rows, real values with units. A row counts as measured only when
+   its latency is positive (the medians-only rows carry 0.0 factors);
+   unmeasured factors render as a dash, never as zero. */
+const COMPARE_FACTORS = [
+  { key: "latency_ms", label: "پینگ", unit: "ms", higher: false, digits: 1 },
+  { key: "jitter_ms", label: "جیتر", unit: "ms", higher: false, digits: 1 },
+  { key: "loss_pct", label: "قطعی", unit: "%", higher: false, digits: 1 },
+  { key: "throughput_down_mbps", label: "دانلود", unit: "Mbps", higher: true, digits: 1 },
+  { key: "throughput_up_mbps", label: "آپلود", unit: "Mbps", higher: true, digits: 1 },
+  { key: "seconds_survived", label: "پایداری زیر بار", unit: "s", higher: true, digits: 0 },
+];
+
+function compareBarPct(values, v, higher) {
+  const max = Math.max(...values), min = Math.min(...values);
+  if (max <= 0) return 0;
+  if (higher) return (v / max) * 100;
+  if (min === 0) return ((max - v) / max) * 100;
+  return (min / v) * 100;
+}
+
+function factorChart(rows, factor, current) {
+  const measured = rows.filter(r => r.latency_ms > 0 && r[factor.key] != null && !r.disqualified);
+  if (!measured.length) return "";
+  const values = measured.map(r => r[factor.key]);
+  const sorted = [...measured].sort((a, b) => factor.higher
+    ? b[factor.key] - a[factor.key] : a[factor.key] - b[factor.key]);
+  const best = sorted[0];
+  const body = sorted.map(r => {
+    const active = current && r.protocol === current;
+    return `<div class="factor-row ${active ? "is-active" : ""}"><span class="ltr">${r.protocol}</span>`
+      + `${bar(compareBarPct(values, r[factor.key], factor.higher), "green")}`
+      + `<span class="val ltr">${r[factor.key].toFixed(factor.digits)} ${factor.unit}</span>`
+      + `${active ? '<span class="factor-tag hot">فعال</span>' : "<span></span>"}</div>`;
+  }).join("");
+  return `<div class="factor-chart"><h4>${factor.label} (${factor.unit}) <span class="muted">· بهترین: ${best.protocol} ${best[factor.key].toFixed(factor.digits)} ${factor.unit}</span></h4>${body}</div>`;
+}
+
+function scoreChart(rows, current) {
+  if (!rows.length) return "";
+  const scored = rows.filter(r => !r.disqualified);
+  const max = scored.length ? Math.max(...scored.map(r => r.score)) : 0;
+  const body = [...rows].sort((a, b) => b.score - a.score).map(r => {
+    const active = current && r.protocol === current;
+    const pct = max > 0 && !r.disqualified ? (r.score / max) * 100 : 0;
+    const tag = r.disqualified ? '<span class="factor-tag">حذف‌شده</span>'
+      : (active ? '<span class="factor-tag hot">فعال</span>' : "<span></span>");
+    const title = r.disqualified && r.dq_reasons.length
+      ? ` title="${r.dq_reasons.join("؛ ")}"` : "";
+    return `<div class="factor-row ${active ? "is-active" : ""} ${r.disqualified ? "is-dq" : ""}"${title}><span class="ltr">${r.protocol}</span>${bar(pct, "green")}<span class="val ltr">${r.score.toFixed(1)}</span>${tag}</div>`;
+  }).join("");
+  return `<div class="factor-chart"><h4>امتیاز ترکیبی</h4>${body}</div>`;
+}
+
+function renderCompare() {
+  const el = $("#compare-section");
+  if (!el) return;
+  el.innerHTML = state.pairs.map(p => {
+    const rows = pairBenchmarks[p.id] || [];
+    const measured = rows.filter(r => r.latency_ms > 0 && !r.disqualified);
+    const bests = [];
+    for (const f of COMPARE_FACTORS) {
+      const cand = measured.filter(r => r[f.key] != null);
+      if (!cand.length) continue;
+      const best = [...cand].sort((a, b) => f.higher
+        ? b[f.key] - a[f.key] : a[f.key] - b[f.key])[0];
+      bests.push(`بهترین ${f.label}: ${best.protocol} (${best[f.key].toFixed(f.digits)}${f.unit ? " " + f.unit : ""})`);
+    }
+    const runAt = rows.length && rows[0].measured_at
+      ? new Date(rows[0].measured_at * 1000).toLocaleString("fa-IR") : "";
+    const factorHtml = COMPARE_FACTORS.map(f => factorChart(rows, f, p.current_protocol)).join("");
+    return `<div class="compare-block"><h3>مقایسه پروتکل‌ها — ${p.name}</h3>`
+      + (runAt ? `<p class="muted small">آخرین بنچمارک: ${runAt}${rows[0].run_id ? " · " + rows[0].run_id : ""}</p>` : "")
+      + (bests.length ? `<p class="compare-best">${bests.join(" · ")}</p>` : "")
+      + scoreChart(rows, p.current_protocol)
+      + (factorHtml ? `<div class="factor-grid">${factorHtml}</div>`
+        : `<p class="muted">بنچمارک تازه در حال اجراست؛ به‌محض ثبت فاکتورها، مقایسه اینجا می‌آید.</p>`)
+      + `</div>`;
+  }).join("");
+}
+
 async function loadAll() {
   try {
     const [s, p, ev] = await Promise.all([
@@ -228,8 +310,12 @@ async function loadAll() {
         try { const d = await api("GET", `/api/pairs/${pr.id}/metrics`); pairMetrics[pr.id] = d.metrics; }
         catch { pairMetrics[pr.id] = []; }
       }),
+      ...state.pairs.map(async pr => {
+        try { const d = await api("GET", `/api/pairs/${pr.id}/benchmarks`); pairBenchmarks[pr.id] = d.benchmarks; }
+        catch { pairBenchmarks[pr.id] = []; }
+      }),
     ]);
-    renderCounters(); renderServerStrip(); renderPairs(); renderTables();
+    renderCounters(); renderServerStrip(); renderPairs(); renderCompare(); renderTables();
     $("#conn-dot").className = "dot ok"; $("#conn-text").textContent = "متصل به هاب";
   } catch (e) {
     if (e.status === 401) { showAuth(); return; }
