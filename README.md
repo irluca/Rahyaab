@@ -2,9 +2,9 @@
 
 # 🚀 Rahyaab (رهیاب)
 
-**A server-side control plane that finds, deploys, and keeps alive the best tunnel between any two servers — automatically.**
+**A server dashboard that finds, deploys, and keeps alive the best tunnel between any two servers — automatically.**
 
-[![Tests](https://img.shields.io/badge/offline%20tests-176%20passing-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/offline%20tests-219%20passing-brightgreen)](#-testing)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](#-quick-start)
 [![Release](https://img.shields.io/badge/release-v1.0-orange)](https://github.com/irluca/Rahyaab/releases/tag/v1.0)
@@ -15,7 +15,7 @@
 
 ---
 
-Rahyaab is a server-side tunnel control plane, derived from Tunnel Studio Pro. The dashboard, health checking and monitoring run on a server (the hub), and tunnels can be built between any two servers in the fleet — not only the dashboard host. Once a tunnel is up, a resident healer on the Iran-side server watches it and restores it the moment it drops, switching protocols if it has to. One rule above all others: **it only builds the best tunnel between servers, monitors it, and re-establishes it — it never touches a PasarGuard panel, its configs, nodes or users, by any path.**
+Rahyaab is a server-side tunnel dashboard, derived from Tunnel Studio Pro. The dashboard, health checking and monitoring run on a server (the hub), and tunnels can be built between any two servers in the fleet — not only the dashboard host. Once a tunnel is up, a resident healer on the Iran-side server watches it and restores it the moment it drops, switching protocols if it has to. One rule above all others: **it only builds the best tunnel between servers, monitors it, and re-establishes it — it never touches a PasarGuard panel, its configs, nodes or users, by any path.**
 
 ## ✨ What it does
 
@@ -69,6 +69,8 @@ bash /tmp/install-rahyaab.sh --role master --bbr --ip-cert --yes                
 bash /tmp/install-rahyaab.sh --role hub --bbr --ip-cert --yes                                    # hub + BBR + self-signed IP cert (auto-renewed)
 bash /tmp/install-rahyaab.sh --role hub --bbr --domain panel.example.com --email you@example.com --yes  # hub + Let's Encrypt
 bash /tmp/install-rahyaab.sh --role node --bbr --yes                                              # node (no dashboard)
+bash /tmp/install-rahyaab.sh --print-join                                                          # print a fresh join command (master only)
+bash /tmp/install-rahyaab.sh --join <host> <token> <fingerprint>                                   # join a node with the three parts of the join command
 ```
 
 **Full setup — master-driven alternative (two raw servers, one command, no Muse needed).** On the hub server, as root:
@@ -88,10 +90,8 @@ Then open **https://YOUR-SERVER-IP:8890**, create the operator account (setup fo
 The behaviour contract is an offline suite (no servers needed):
 
 ```bash
-python -m pytest orchestrator/ -q
-# 176 tests + 13 subtests — benchmarks, failover, safety gates, installer hygiene…
-python -m pytest hub/ -q
-# hub API, dashboard, benchmarks, switch
+python -m pytest orchestrator/ hub/ -q
+# 219 tests — benchmarks, failover, safety gates, installer hygiene, wizard and join flow
 ```
 
 ## 🗂️ Layout
@@ -101,7 +101,7 @@ orchestrator/     proven engine: benchmark, deploy, healer, failover, alerts, of
 agent/            resident Rust agent (restart-only, reports only)
 hub/              fleet registry, pairs, JSON API, healer control, jobs, login
 dashboard/        fresh single-page dashboard (RTL, Vazirmatn, dark theme)
-install.sh        server installer (hub/node, BBR, certificates, update, uninstall)
+install.sh        server installer (master/node, join flow, BBR, certificates, update, uninstall)
 *.sh              standalone installer pairs (iran-*.sh / foreign-*.sh)
 docs/             runbooks (phases, panel survey)
 ```
@@ -114,6 +114,10 @@ docs/             runbooks (phases, panel survey)
 - **Phase 4 (live install + tests)** — DONE 2026-10-26: hub on the Iran host, live pair adopted, live API tests passed, overlay switching proven live (carrier↔carrier and carrier↔overlay).
 - **Phase 5 (repo + tag)** — DONE 2026-10-27: public repo, tag `v1.0`.
 - **Installer 1.0.2** — DONE 2026-10-27: live-tested on both servers (node + hub, BBR, IP certificate kept, healer and tunnel untouched).
+- **Installer 1.1.0 and 1.1.1** — DONE 2026-10-27: the hub key is generated on the hub itself and never overwritten once it exists.
+- **Installer 1.2.0** — DONE 2026-10-27: remote node install from the hub server, over the hub key.
+- **Installer 1.3.0** — DONE 2026-10-27: full-setup wizard in one command (hub + node + pair + first tunnel + healer).
+- **Installer 1.4.0** — DONE 2026-10-27: master/node join flow; no IP typing, just one pasted line. Its live test happens on rebuild.
 
 ## 📌 Scope
 
