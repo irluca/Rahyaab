@@ -1,41 +1,46 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────
-#  رهیاب | RAHYAAB — نصب‌کننده کنترل‌صفحه تانل بین سرورها
+#  Rahyaab — tunnel dashboard installer for your servers
 #
-#  اجرا روی خود سرور (با دسترسی root):
+#  Run on the server itself (as root):
 #      bash <(curl -fsSL https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh)
-#  یا از روی فایل محلی:
+#  or from a local file:
 #      bash install.sh
 #
-#  ایده‌ها از نصب‌کننده‌های BackPack و Kariz گرفته شده (منوی تعاملی،
-#  نصب یک‌خطی، بدون داکر) — ولی کد، موتور و داشبورد کاملاً خود رهیاب است.
+#  Ideas borrowed from the BackPack and Kariz installers (interactive
+#  menu, one-line install, no Docker) — but the code, engine, and
+#  dashboard are entirely Rahyaab's own.
 #
-#  این اسکریپت فقط «میزبان» را آماده می‌کند: وابستگی‌ها، کد رهیاب،
-#  هاب/نود، BBR، فایروال و گواهی پنل — به‌علاوه کلید هاب: موقع نصب
-#  هاب، اگر کلیدی نباشد روی همین سرور ساخته می‌شود و با ‎--push-key
-#  می‌شود با پسورد یک‌باره روت نود، روی آن نود نصبش کرد (پسورد هیچ‌جا
-#  ذخیره نمی‌شود). ساخت حساب اپراتور، افزودن سرورها،
-#  بنچمارک و پیکربندی نگهبان بعد از نصب، از داخل خود داشبورد انجام
-#  می‌شود (مثل ویزارد راه‌اندازی Nexora) — اسکریپت هیچ رمز و حسابی
-#  نمی‌سازد و چیزی را جعل نمی‌کند.
+#  This script only prepares the host: dependencies, Rahyaab code,
+#  hub/node, BBR, firewall, and the panel certificate — plus the hub
+#  key: when the hub is installed and no key exists, one is generated
+#  on this very server, and with --push-key it can be installed on a
+#  node using that node's one-time root password (the password is
+#  never stored). Creating the operator account, adding servers,
+#  benchmarking, and configuring the healer all happen after install,
+#  inside the dashboard itself (like the Nexora setup wizard) — the
+#  script creates no passwords or accounts and fakes nothing.
 #
-#  خط قرمز همیشگی: این اسکریپت به پنل PasarGuard، کانفیگ‌ها و
-#  یوزرهایش هیچ دسترسی و تغییری ندارد، و به تانل‌ها و نگهبانِ در حال
-#  اجرا دست نمی‌زند. اجرای دوباره امن است: کد تازه می‌شود، ولی
-#  دیتابیس هاب و گواهی‌های موجود دست نمی‌خورند.
+#  Permanent red line: this script never accesses or changes any
+#  PasarGuard panel, its configs, or its users, and it never touches
+#  running tunnels or the healer. Re-running is safe: the code is
+#  refreshed, but the hub database and existing certificates are
+#  never touched.
 #
-#  گواهی و آی‌پی — صادقانه: Let's Encrypt برای آی‌پیِ خالی گواهی
-#  نمی‌دهد (فقط دامنه). پس دو مسیر جدا داریم:
-#    • دامنه → گواهی واقعی Let's Encrypt + تمدید خودکار (certbot)
-#    • آی‌پی  → گواهی self-signed با SAN آی‌پی + تایمر تمدید خودکار
-#      که پیش از انقضا خودش گواهی تازه می‌سازد و هاب را ری‌استارت
-#      می‌کند. مرورگر بار اول هشدار می‌دهد؛ اثر انگشت گواهی در
-#      خلاصه پایانی چاپ می‌شود تا با خروجی مرورگر مقایسه شود.
+#  Certificates and IPs — honestly: Let's Encrypt does not issue
+#  certificates for a bare IP (domains only). So there are two
+#  separate paths:
+#    • Domain → a real Let's Encrypt certificate + auto-renewal (certbot)
+#    • IP     → a self-signed certificate with an IP SAN + an
+#      auto-renewal timer that rebuilds it before expiry and
+#      restarts the hub. The browser warns the first time; the
+#      certificate fingerprint is printed in the final summary so
+#      you can compare it with what the browser shows.
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 VERSION="1.4.0"
-# پیش‌فرض مخزن؛ تا وقتی فاز ۵ پوش نشده، با --repo یا --local عوضش کنید.
+# Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
 INSTALL_DIR="/opt/rahyaab"
@@ -71,7 +76,7 @@ YES=0
 FORCE=0
 CHECK_ONLY=0
 
-# ── رنگ و پیام ──────────────────────────────────────────────────
+# ── Colors and messages ──────────────────────────────────────────────────
 if [ -t 1 ]; then
     C_CYAN='\033[1;36m'; C_GREEN='\033[1;32m'; C_YELLOW='\033[1;33m'
     C_RED='\033[1;31m'; C_DIM='\033[2m'; C_RESET='\033[0m'
@@ -87,20 +92,21 @@ step()  { echo; echo -e "${C_CYAN}── $* ──${C_RESET}"; }
 
 banner() {
     echo -e "${C_CYAN}"
-    echo '  ╔══════════════════════════════════════════════════════╗'
-    echo '  ║                                                      ║'
-    echo '  ║     رهیاب  ·  R A H Y A A B                           ║'
-    echo '  ║     کنترل‌صفحه تانل بین سرورها                        ║'
-    echo "  ║     نصب‌کننده نسخه $VERSION                             ║"
-    echo '  ║                                                      ║'
-    echo '  ╚══════════════════════════════════════════════════════╝'
+    echo '██████╗  █████╗ ██╗  ██╗██╗   ██╗ █████╗  █████╗ ██████╗ '
+    echo '██╔══██╗██╔══██╗██║  ██║╚██╗ ██╔╝██╔══██╗██╔══██╗██╔══██╗'
+    echo '██████╔╝███████║███████║ ╚███╔╝ ███████║███████║██████╔╝'
+    echo '██╔══██╗██╔══██║██╔══██║ ██╔██╗ ██╔══██║██╔══██║██╔══██╗'
+    echo '██║  ██║██║  ██║██║  ██║██╔╝ ██╗██║  ██║██║  ██║██████╔╝'
+    echo '╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ '
     echo -e "${C_RESET}"
+    echo 'Rahyaab v1.4.0 — tunnel dashboard between your servers'
+    echo -e "${C_DIM}──────────────────────────────────────────────────────────────${C_RESET}"
 }
 
 confirm() {
     if [ "$YES" -eq 1 ]; then return 0; fi
     local ans
-    read -r -p "ادامه می‌دهیم؟ [y/N] " ans
+    read -r -p "Continue? [y/N] " ans
     case "$ans" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
 
@@ -121,57 +127,58 @@ public_ip() {
     if [ -z "$ip" ]; then
         ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     fi
-    echo "${ip:-نامشخص}"
+    echo "${ip:-unknown}"
 }
 
 usage() {
     cat <<EOF
-استفاده:
-  bash install.sh                     منوی تعاملی (اول می‌پرسد: مستر یا نود؟)
-  bash install.sh --role master       نصب غیرتعاملی مستر (هاب + ثبت مستر + دستور اتصال)
-  bash install.sh --role hub          نصب غیرتعاملی هاب (بدون ثبت مستر)
-  bash install.sh --role node         نصب غیرتعاملی نود (بدون اتصال)
-  bash install.sh --join HOST TOKEN FINGERPRINT   اتصال نود به مستر با دستور اتصال (پیست یک خط از مستر)
-  bash install.sh --print-join        نمایش دستور اتصال نود (روی مستر؛ کد یک‌بارمصرف تازه می‌سازد)
+Usage:
+  bash install.sh                     Interactive menu (Setup Iran, Setup Kharej, Manage, Backup, Web Panel, Optimize, Update, Uninstall)
+  bash install.sh --role master       Non-interactive master install (hub + master registration + join command)
+  bash install.sh --role hub          Non-interactive hub install (no master registration)
+  bash install.sh --role node         Non-interactive node install (no join)
+  bash install.sh --join HOST TOKEN FINGERPRINT   Join a node to the master with the join command (paste one line from the master)
+  bash install.sh --print-join        Show the node join command (on the master; generates a fresh single-use code)
   bash install.sh --role hub --bbr --domain panel.example.com --email you@example.com
   bash install.sh --role hub --bbr --ip-cert
   bash install.sh --local /path/to/rahyaab --role hub
-  bash install.sh --push-key 203.0.113.20   نصب کلید هاب روی نود (پسورد روت نود یک بار پرسیده می‌شود، هیچ‌جا ذخیره نمی‌شود)
-  bash install.sh --remote-node 203.0.113.20   نصب نود روی سرور دیگر از همین سرور هاب (با کلید هاب؛ پیش‌نیاز: push-key)
-  bash install.sh --full-setup 203.0.113.20 --bbr --ip-cert   راه‌اندازی کامل: هاب + نود + جفت + تانل اول + نگهبان (پسورد روت نود یک بار پرسیده می‌شود)
-  bash install.sh --check-only        فقط بررسی پیش‌نیازها، بدون تغییر
+  bash install.sh --push-key 203.0.113.20   Install the hub key on a node (the node root password is asked once and never stored)
+  bash install.sh --remote-node 203.0.113.20   Install a node on another server from this hub server (with the hub key; requires push-key first)
+  bash install.sh --full-setup 203.0.113.20 --bbr --ip-cert   Full setup: hub + node + pair + first tunnel + healer (the node root password is asked once)
+  bash install.sh --check-only        Check prerequisites only, no changes
 
-کلید هاب: موقع نصب هاب، اگر کلیدی نباشد روی همین سرور ساخته می‌شود
-(/etc/rahyaab/hub_key) و کلید موجود هیچ‌وقت بازنویسی نمی‌شود. هاب با
-همین کلید به نودها وصل می‌شود؛ برای اعتماد اول، یا کلید عمومی چاپ‌شده
-را دستی روی نود بگذارید، یا با --push-key و پسورد یک‌باره روت نود،
-نصبش کنید. پسورد فقط برای همان یک اتصال است و بعد دور انداخته می‌شود.
+Hub key: when the hub is installed and no key exists, one is generated
+on this server (/etc/rahyaab/hub_key) and an existing key is never
+overwritten. The hub reaches nodes with this key; for first trust,
+either copy the printed public key to the node by hand, or install
+it with --push-key and the node's one-time root password. The
+password is used for that one connection only and then discarded.
 
-گزینه‌ها:
-  --role hub|node|master   نقش این سرور (هاب = داشبورد، نود = بدون داشبورد،
-                           مستر = هاب + ثبت خودکار مستر + چاپ دستور اتصال نود)
-  --join HOST TOKEN FINGERPRINT   اتصال این نود به مستر (سه تکه دستور اتصال)
-  --print-join        نمایش دستور اتصال نود (فقط روی مستر)
-  --push-key HOST     نصب کلید هاب روی نود با پسورد یک‌باره روت آن
-  --remote-node HOST  نصب نود روی سرور دیگر از همین سرور هاب (پیش‌نیاز: push-key)
-  --full-setup HOST   راه‌اندازی کامل دو سرور (هاب + نود + جفت + تانل اول + نگهبان)
-  --iran-host IP      آی‌پی سرور هاب برای full-setup (پیش‌فرض: تشخیص خودکار)
-  --pair-name NAME    نام جفت برای full-setup (پیش‌فرض: جفت اصلی)
-  --protocol PROTO    پروتکل تانل اول برای full-setup (پیش‌فرض: GRE)
-  --node-user USER    یوزر نود برای push-key (پیش‌فرض: root)
-  --node-port PORT    پورت SSH نود برای push-key (پیش‌فرض: 22)
-  --bbr               فعال‌سازی BBR
-  --domain DOMAIN     گواهی Let's Encrypt برای دامنه
-  --email EMAIL       ایمیل certbot (برای --domain لازم است)
-  --ip-cert           گواهی self-signed برای آی‌پی + تمدید خودکار
-  --cert FILE --key FILE   گواهی آماده خودتان
-  --local DIR         نصب کد از روی فایل‌های محلی (به‌جای دانلود)
-  --repo OWNER/REPO   مخزن گیت‌هاب (پیش‌فرض: $REPO)
-  --branch BRANCH     شاخه (پیش‌فرض: $BRANCH)
-  --yes               بدون پرسش تایید
-  --force             رد شدن از بررسی سیستم‌عامل
-  --check-only        فقط بررسی، بدون نصب
-  --help              همین راهنما
+Options:
+  --role hub|node|master   Role of this server (hub = dashboard, node = no dashboard,
+                           master = hub + automatic master registration + print the node join command)
+  --join HOST TOKEN FINGERPRINT   Join this node to the master (three parts of the join command)
+  --print-join        Show the node join command (master only)
+  --push-key HOST     Install the hub key on a node with its one-time root password
+  --remote-node HOST  Install a node on another server from this hub server (requires push-key first)
+  --full-setup HOST   Full setup of both servers (hub + node + pair + first tunnel + healer)
+  --iran-host IP      Hub server IP for full-setup (default: auto-detected)
+  --pair-name NAME    Pair name for full-setup (default: $PAIR_NAME)
+  --protocol PROTO    First-tunnel protocol for full-setup (default: GRE)
+  --node-user USER    Node user for push-key (default: root)
+  --node-port PORT    Node SSH port for push-key (default: 22)
+  --bbr               Enable BBR
+  --domain DOMAIN     Let's Encrypt certificate for a domain
+  --email EMAIL       certbot email (required with --domain)
+  --ip-cert           Self-signed IP certificate + auto-renewal
+  --cert FILE --key FILE   Your own ready certificate
+  --local DIR         Install code from local files (instead of downloading)
+  --repo OWNER/REPO   GitHub repository (default: $REPO)
+  --branch BRANCH     Branch (default: $BRANCH)
+  --yes               No confirmation prompts
+  --force             Skip the OS check
+  --check-only        Check only, no install
+  --help              This help text
 EOF
 }
 
@@ -203,58 +210,58 @@ parse_args() {
             --check-only) CHECK_ONLY=1; shift ;;
             --help)     usage; exit 0 ;;
             --version)  echo "rahyaab-installer $VERSION"; exit 0 ;;
-            *)          die "گزینه ناشناخته: $1 (با --help راهنما را ببینید)" ;;
+            *)          die "Unknown option: $1 (see --help)" ;;
         esac
     done
-    case "$ROLE" in ""|hub|node|master) ;; *) die "نقش نامعتبر: $ROLE (hub، node یا master)" ;; esac
+    case "$ROLE" in ""|hub|node|master) ;; *) die "Invalid role: $ROLE (hub, node, or master)" ;; esac
     if [ -n "$DOMAIN" ] && [ -z "$EMAIL" ]; then
-        die "برای گواهی دامنه، --email هم لازم است"
+        die "--email is also required for a domain certificate"
     fi
     if { [ -n "$CERT_PATH" ] || [ -n "$KEY_PATH" ]; } && { [ -z "$CERT_PATH" ] || [ -z "$KEY_PATH" ]; }; then
-        die "--cert و --key باید با هم داده شوند"
+        die "--cert and --key must be given together"
     fi
 }
 
 need_root() {
-    [ "$(id -u)" -eq 0 ] || die "این اسکریپت باید با دسترسی root اجرا شود (sudo bash install.sh)"
+    [ "$(id -u)" -eq 0 ] || die "This script must run as root (sudo bash install.sh)"
 }
 
 detect_os() {
     if [ -f /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
-        info "سیستم‌عامل: ${NAME:-نامشخص} ${VERSION_ID:-}"
+        info "OS: ${NAME:-unknown} ${VERSION_ID:-}"
         case "${ID:-}" in
             debian|ubuntu) return 0 ;;
             *)
                 if [ "$FORCE" -eq 1 ]; then
-                    warn "سیستم‌عامل غیر از Debian/Ubuntu است؛ با --force ادامه می‌دهیم"
+                    warn "OS is not Debian/Ubuntu; continuing with --force"
                     return 0
                 fi
-                die "فقط Debian و Ubuntu پشتیبانی می‌شوند (با --force می‌شود رد شد)"
+                die "Only Debian and Ubuntu are supported (use --force to skip this check)"
                 ;;
         esac
     else
-        die "فایل /etc/os-release پیدا نشد؛ سیستم‌عامل قابل تشخیص نیست"
+        die "/etc/os-release not found; cannot detect the OS"
     fi
 }
 
 check_only() {
-    step "بررسی پیش‌نیازها (بدون تغییر)"
+    step "Checking prerequisites (no changes)"
     need_root
     detect_os
-    echo "python3: $(python3 --version 2>/dev/null || echo 'نصب نیست')"
-    echo "openssl: $(openssl version 2>/dev/null || echo 'نصب نیست')"
-    echo "curl:    $(curl --version 2>/dev/null | head -1 || echo 'نصب نیست')"
-    echo "آی‌پی عمومی: $(public_ip)"
-    echo "هاب نصب‌شده: $(systemctl is-active "$UNIT" 2>/dev/null || echo 'no')"
-    echo "BBR: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'نامشخص')"
-    ok "بررسی تمام شد؛ تغییری انجام نشد"
+    echo "python3: $(python3 --version 2>/dev/null || echo 'not installed')"
+    echo "openssl: $(openssl version 2>/dev/null || echo 'not installed')"
+    echo "curl:    $(curl --version 2>/dev/null | head -1 || echo 'not installed')"
+    echo "Public IP: $(public_ip)"
+    echo "Hub installed: $(systemctl is-active "$UNIT" 2>/dev/null || echo 'no')"
+    echo "BBR: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
+    ok "Check complete; nothing was changed"
 }
 
-# ── وابستگی‌ها و کد ─────────────────────────────────────────────
+# ── Dependencies and code ─────────────────────────────────────────────
 install_deps() { # $1 = hub|node
-    step "نصب وابستگی‌های سیستم"
+    step "Installing system dependencies"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     local pkgs="python3 curl openssl iproute2 iptables unzip tar ca-certificates"
@@ -262,93 +269,94 @@ install_deps() { # $1 = hub|node
         pkgs="$pkgs python3-paramiko"
     fi
     apt-get install -y -qq $pkgs
-    ok "وابستگی‌ها نصب شد"
+    ok "Dependencies installed"
 }
 
 fetch_code() {
-    step "دریافت کد رهیاب"
+    step "Fetching Rahyaab code"
     mkdir -p "$INSTALL_DIR"
     if [ -n "$LOCAL_SRC" ]; then
-        [ -d "$LOCAL_SRC" ] || die "پوشه محلی پیدا نشد: $LOCAL_SRC"
-        [ -f "$LOCAL_SRC/hub/main.py" ] || die "در پوشه محلی hub/main.py نیست؛ مسیر ریشه ریپو را بدهید"
+        [ -d "$LOCAL_SRC" ] || die "Local directory not found: $LOCAL_SRC"
+        [ -f "$LOCAL_SRC/hub/main.py" ] || die "hub/main.py is not in the local directory; pass the repository root"
         (cd "$LOCAL_SRC" && tar --exclude=.git --exclude=__pycache__ --exclude='*.pyc' -cf - .) \
             | (cd "$INSTALL_DIR" && tar -xf -)
-        ok "کد از روی فایل‌های محلی کپی شد"
+        ok "Code copied from local files"
     else
         local url="https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}"
         local auth_args=()
         if [ -n "${GITHUB_TOKEN:-}" ]; then
             auth_args=(-H "Authorization: Bearer $GITHUB_TOKEN")
         fi
-        info "دانلود از $url"
+        info "Downloading from $url"
         if ! curl -fsSL "${auth_args[@]}" -o /tmp/rahyaab.tgz "$url"; then
-            die "دانلود ناموفق بود (گیت‌هاب برای ریپوی خصوصی بدون توکن ۴۰۴ می‌دهد). دو راه دارید: (۱) یک کپی از کد را با SCP روی سرور بگذارید و با --local <پوشه> نصب کنید؛ (۲) یک توکن خواندنی (fine-grained PAT، فقط همان ریپو) بسازید و با GITHUB_TOKEN=<توکن> همین دستور را دوباره بزنید. توکن را در فایل یا تاریخچه شل ذخیره نکنید."
+            die "Download failed (GitHub returns 404 for a private repo without a token). Two options: (1) copy the code to the server with SCP and install with --local <dir>; (2) create a read-only token (fine-grained PAT, only this repo) and rerun with GITHUB_TOKEN=<token>. Do not store the token in a file or shell history."
         fi
         tar -xzf /tmp/rahyaab.tgz --strip-components=1 -C "$INSTALL_DIR"
         rm -f /tmp/rahyaab.tgz
-        ok "کد دانلود و باز شد"
+        ok "Code downloaded and extracted"
     fi
-    [ -f "$INSTALL_DIR/hub/main.py" ] || die "hub/main.py در کد دریافتی نیست"
-    [ -d "$INSTALL_DIR/dashboard" ] || warn "پوشه dashboard در کد نیست؛ داشبورد سرو نمی‌شود"
+    [ -f "$INSTALL_DIR/hub/main.py" ] || die "hub/main.py is not in the downloaded code"
+    [ -d "$INSTALL_DIR/dashboard" ] || warn "dashboard directory is not in the code; the dashboard will not be served"
     mkdir -p "$DATA_DIR" "$CONF_DIR"
 }
 
-# ── کلید هاب ────────────────────────────────────────────────────
-# کلید هاب روی همین سرور ساخته و نگه داشته می‌شود؛ هیچ‌وقت به
-# گیت‌هاب پوش نمی‌شود و هیچ‌وقت پیش متا نیست. هاب با همین کلید به
-# نودها وصل می‌شود (رکورد هر سرور در داشبورد، اگر key_path نداشته
-# باشد، همین مسیر را پیش‌فرض می‌گیرد).
+# ── Hub key ────────────────────────────────────────────────────
+# The hub key is generated and kept on this very server; it is
+# never pushed to GitHub and never held by Muse. The hub reaches
+# nodes with this key (a server record in the dashboard without a
+# key_path defaults to this path).
 ensure_hub_key() {
     mkdir -p "$CONF_DIR"
     if [ -f "$HUB_KEY" ]; then
-        # کلید خصوصی موجود، هرگز بازنویسی نمی‌شود — حتی اگر فایل
-        # عمومی همراهش نباشد (استقرارهای قدیمی فقط خصوصی را داشتند).
-        # در آن صورت عمومی را از روی خصوصی بازسازی می‌کنیم.
+        # An existing private key is never overwritten — even if its
+        # public file is missing (old deployments shipped private only).
+        # In that case the public key is rebuilt from the private one.
         if [ ! -f "$HUB_PUB" ]; then
             ssh-keygen -y -f "$HUB_KEY" > "$HUB_PUB" \
-                || die "بازسازی کلید عمومی هاب از روی خصوصی ناموفق بود"
+                || die "Rebuilding the hub public key from the private key failed"
             chmod 644 "$HUB_PUB"
-            info "کلید عمومی هاب از روی خصوصی موجود بازسازی شد"
+            info "Hub public key rebuilt from the existing private key"
         else
-            info "کلید هاب از قبل هست و دست نمی‌خورد: $HUB_KEY"
+            info "Hub key already exists and will not be touched: $HUB_KEY"
         fi
     else
-        step "ساخت کلید هاب"
+        step "Generating the hub key"
         rm -f "$HUB_KEY" "$HUB_PUB"
         ssh-keygen -t ed25519 -f "$HUB_KEY" -N "" -C "rahyaab-hub" >/dev/null \
-            || die "ساخت کلید هاب ناموفق بود"
+            || die "Generating the hub key failed"
         chmod 600 "$HUB_KEY"
         chmod 644 "$HUB_PUB"
-        ok "کلید هاب ساخته شد: $HUB_KEY"
+        ok "Hub key generated: $HUB_KEY"
     fi
-    info "کلید عمومی هاب (برای کپی دستی روی نود، اگر نخواستی پسورد بدهی):"
+    info "Hub public key (copy it manually to a node if you do not want to give a password):"
     cat "$HUB_PUB"
-    info "اثر انگشت: $(ssh-keygen -lf "$HUB_PUB" | awk '{print $2}')"
+    info "Fingerprint: $(ssh-keygen -lf "$HUB_PUB" | awk '{print $2}')"
 }
 
-# نصب کلید عمومی هاب روی یک نود با پسورد یک‌باره روت آن نود.
-# پسورد فقط برای همین یک اتصال استفاده می‌شود؛ هیچ‌جا ذخیره، لاگ
-# یا چاپ نمی‌شود و بلافاصله بعد از اتصال از حافظه پاک می‌شود.
-# بعد از این، نود فقط با کلید هاب باز می‌شود و پسورد دیگر لازم نیست.
-# کلید هاست نود هم همان‌جا در /root/.ssh/known_hosts پین می‌شود
-# (ورودی کهنه همان هاست، مثل بعد از ریبیلد، اول پاک می‌شود).
+# Install the hub public key on a node with that node's one-time
+# root password. The password is used for this one connection only;
+# it is never stored, logged, or printed, and is wiped from memory
+# right after the connection. After this, the node opens only with
+# the hub key and no password is needed anymore. The node host key
+# is pinned right there in /root/.ssh/known_hosts (a stale entry
+# for the same host, e.g. after a rebuild, is removed first).
 push_key() { # $1 = node host
     local node="${1:-$NODE_HOST}"
-    [ -n "$node" ] || die "هاست نود لازم است (‎--push-key <host>‎)"
+    [ -n "$node" ] || die "Node host is required (--push-key <host>)"
     ensure_hub_key
     if ! python3 -c "import paramiko" 2>/dev/null; then
-        step "نصب python3-paramiko برای اتصال یک‌باره"
+        step "Installing python3-paramiko for the one-time connection"
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -y -qq python3-paramiko \
-            || die "نصب paramiko ناموفق بود"
+            || die "Installing paramiko failed"
     fi
     local pass
-    echo "پسورد روت نود $node فقط همین یک بار پرسیده می‌شود و هیچ‌جا ذخیره نمی‌شود."
-    read -r -s -p "پسورد روت $node: " pass
+    echo "The node root password for $node is asked only this once and is never stored."
+    read -r -s -p "Root password for $node: " pass
     echo
-    [ -n "$pass" ] || die "پسورد خالی داده شد"
-    step "نصب کلید هاب روی $node"
+    [ -n "$pass" ] || die "Empty password given"
+    step "Installing the hub key on $node"
     RAHYAAB_NODE_PASSWORD="$pass" HUB_KEY="$HUB_KEY" HUB_PUB="$HUB_PUB" \
         NODE_HOST="$node" NODE_USER="$NODE_USER" NODE_PORT="$NODE_PORT" \
         python3 - "$HUB_KEY" "$HUB_PUB" <<'PYEOF'
@@ -366,7 +374,7 @@ c = paramiko.SSHClient()
 c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 c.connect(host, port, user, password=pw, timeout=20, banner_timeout=30,
           auth_timeout=30, allow_agent=False, look_for_keys=False)
-# پین کلید هاست (ورودی کهنه همان هاست را اول دور بریز تا بعد از ریبیلد گیر نکند)
+# Pin the host key (drop a stale entry for the same host first, so a rebuild does not break it)
 rk = c.get_transport().get_remote_server_key()
 line = "%s %s %s" % (host, rk.get_name(), rk.get_base64())
 old = open(kh_path).read() if os.path.exists(kh_path) else ""
@@ -375,7 +383,7 @@ if line not in kept:
     kept.append(line)
 open(kh_path, "w").write("\n".join(kept) + "\n")
 os.chmod(kh_path, 0o600)
-# افزودن کلید عمومی هاب (فقط اگر نباشد)
+# Add the hub public key (only if missing)
 sftp = c.open_sftp()
 try:
     sftp.stat("/root/.ssh")
@@ -395,7 +403,7 @@ if pub not in cur:
 else:
     print("hub key already present on node")
 c.close()
-# راستی‌آزمایی: ورود فقط با کلید، با سیاست رد هاست ناشناس
+# Verify: key-only login, rejecting unknown hosts
 c2 = paramiko.SSHClient()
 c2.load_system_host_keys()
 c2.load_host_keys(kh_path)
@@ -410,104 +418,107 @@ PYEOF
     local rc=$?
     pass=""
     unset RAHYAAB_NODE_PASSWORD
-    [ "$rc" -eq 0 ] || die "نصب کلید روی نود ناموفق بود"
-    ok "کلید هاب روی $node نصب و ورود فقط با کلید راستی‌آزمایی شد؛ پسورد دور انداخته شد"
+    [ "$rc" -eq 0 ] || die "Installing the key on the node failed"
+    ok "Hub key installed on $node and key-only login verified; password discarded"
 }
 
-# نصب نود روی سرور دیگر، از همین سرور هاب، با کلید هاب.
-# پیش‌نیاز: push-key قبلاً برای آن نود اجرا شده باشد (کلید هاست پین
-# شده و کلید هاب روی نود نصب شده باشد)؛ وگرنه به‌جای پرسشِ معلق،
-# تمیز خطا می‌دهد. کد از همین /opt/rahyaab تاربال می‌شود، پس نیازی
-# به دانلود دوباره از گیت‌هاب نیست.
+# Install a node on another server, from this hub server, with
+# the hub key. Prerequisite: push-key must already have run for
+# that node (host key pinned and hub key installed on the node);
+# otherwise it fails cleanly instead of hanging on a question.
+# The code is tarballed from this very /opt/rahyaab, so no second
+# download from GitHub is needed.
 install_node_remote() { # $1 = node host
     local node="${1:-$REMOTE_NODE}"
-    [ -n "$node" ] || die "هاست نود لازم است (‎--remote-node <host>‎)"
+    [ -n "$node" ] || die "Node host is required (--remote-node <host>)"
     ensure_hub_key
-    [ -d "$INSTALL_DIR" ] || die "کد رهیاب روی این سرور نیست؛ اول هاب را نصب کنید"
-    [ -f "$INSTALL_DIR/hub/main.py" ] || die "hub/main.py در $INSTALL_DIR نیست"
-    [ -f "$INSTALL_DIR/install.sh" ] || die "install.sh در $INSTALL_DIR نیست"
-    step "نصب نود روی $node از راه دور"
+    [ -d "$INSTALL_DIR" ] || die "Rahyaab code is not on this server; install the hub first"
+    [ -f "$INSTALL_DIR/hub/main.py" ] || die "hub/main.py is not in $INSTALL_DIR"
+    [ -f "$INSTALL_DIR/install.sh" ] || die "install.sh is not in $INSTALL_DIR"
+    step "Installing a node on $node remotely"
     local tgz="/tmp/rahyaab-node.tgz"
     (cd "$INSTALL_DIR" && tar --exclude=.git --exclude=__pycache__ --exclude='*.pyc' --exclude='*.bak-*' -czf "$tgz" .) \
-        || die "ساخت تاربال کد ناموفق بود"
+        || die "Creating the code tarball failed"
     scp -i "$HUB_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
         -o ConnectTimeout=20 -P "$NODE_PORT" "$tgz" "$INSTALL_DIR/install.sh" \
         "$NODE_USER@$node:/tmp/" \
-        || die "ارسال به نود ناموفق بود؛ اول push-key را برای $node اجرا کنید"
+        || die "Sending to the node failed; run push-key for $node first"
     ssh -i "$HUB_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
         -o ConnectTimeout=20 -p "$NODE_PORT" "$NODE_USER@$node" \
         "rm -rf /tmp/rahyaab-src && mkdir -p /tmp/rahyaab-src && tar -xzf /tmp/rahyaab-node.tgz -C /tmp/rahyaab-src && bash /tmp/install.sh --role node --bbr --local /tmp/rahyaab-src --yes" \
-        || die "نصب نود روی $node ناموفق بود"
-    step "راستی‌آزمایی نود"
+        || die "Installing the node on $node failed"
+    step "Verifying the node"
     ssh -i "$HUB_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
         -o ConnectTimeout=20 -p "$NODE_PORT" "$NODE_USER@$node" \
         "test -f /opt/rahyaab/hub/main.py && sysctl -n net.ipv4.tcp_congestion_control" \
-        || die "راستی‌آزمایی نود ناموفق بود"
+        || die "Node verification failed"
     rm -f "$tgz"
-    ok "نود روی $node نصب و راستی‌آزمایی شد"
+    ok "Node on $node installed and verified"
 }
 
-# راه‌اندازی کامل دو سرور از همین سرور هاب: نصب هاب + BBR + گواهی +
-# push-key + نصب نود از راه دور + ثبت جفت در دیتابیس هاب + زنجیره
-# اندازه‌گیری/استقرار/نصب نگهبان (wizard_setup.run_setup).
-# پسورد روت نود فقط در قدم push-key پرسیده می‌شود و هیچ‌جا ذخیره نمی‌شود.
-# قدم زنجیره چند دقیقه طول می‌کشد (بنچمارک + استقرار + نصب نگهبان).
-# محافظ: اگر جفتی با همین نام از قبل راه‌اندازی شده باشد (پروتکل جاری
-# دارد)، پیش از هر تغییر مخربی متوقف می‌شود؛ راه‌اندازیِ ناتمامِ قبلی
-# (بدون پروتکل جاری) را می‌شود با اجرای دوباره ادامه داد.
+# Full setup of both servers from this hub server: hub install +
+# BBR + certificate + push-key + remote node install + pair
+# registration in the hub database + the measure/deploy/install-
+# healer chain (wizard_setup.run_setup). The node root password
+# is asked only at the push-key step and never stored. The chain
+# step takes a few minutes (benchmark + deploy + healer install).
+# Guard: if a pair with the same name is already set up (it has a
+# current protocol), it stops before any destructive change; a
+# previous incomplete setup (no current protocol) can be resumed
+# by running again.
 full_setup() { # $1 = node host
     local node="${1:-$FULL_SETUP_NODE}"
-    [ -n "$node" ] || die "هاست نود لازم است (‎--full-setup <host>‎)"
+    [ -n "$node" ] || die "Node host is required (--full-setup <host>)"
     local iran_ip="$IRAN_HOST"
     if [ -z "$iran_ip" ]; then
         iran_ip="$(public_ip)"
     fi
-    [ -n "$iran_ip" ] && [ "$iran_ip" != "نامشخص" ] \
-        || die "آی‌پی این سرور پیدا نشد؛ با ‎--iran-host بدهید"
+    [ -n "$iran_ip" ] && [ "$iran_ip" != "unknown" ] \
+        || die "Could not find this server's IP; pass it with --iran-host"
     if [ "$YES" -eq 0 ]; then
-        ask IRAN_HOST "آی‌پی این سرور (هاب/ایران)" "$iran_ip"
+        ask IRAN_HOST "IP of this server (hub/Iran)" "$iran_ip"
         iran_ip="$IRAN_HOST"
     fi
-    step "۱) نصب هاب روی این سرور"
+    step "1) Installing the hub on this server"
     install_hub
     if [ "$BBR" -eq 1 ]; then enable_bbr; fi
     if [ -n "$DOMAIN" ]; then cert_domain; fi
     if [ "$IP_CERT" -eq 1 ]; then cert_ip; fi
     if [ -n "$CERT_PATH" ]; then cert_custom; fi
-    step "۲) نصب کلید هاب روی نود (پسورد یک‌باره پرسیده می‌شود)"
+    step "2) Installing the hub key on the node (one-time password will be asked)"
     push_key "$node"
-    step "۳) نصب نود روی $node از راه دور"
+    step "3) Installing the node on $node remotely"
     install_node_remote "$node"
-    step "۴) ثبت سرورها و جفت در دیتابیس هاب"
+    step "4) Registering the servers and pair in the hub database"
     local pair_json pair_id pair_protocol
     pair_json="$(cd "$INSTALL_DIR" && python3 -m hub.wizard --db "$HUB_DB" --iran-host "$iran_ip" --foreign-host "$node" --pair-name "$PAIR_NAME")" \
-        || die "ثبت جفت در دیتابیس هاب ناموفق بود"
+        || die "Registering the pair in the hub database failed"
     pair_id="$(echo "$pair_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')" \
-        || die "خواندن شناسه جفت ناموفق بود"
+        || die "Reading the pair ID failed"
     pair_protocol="$(echo "$pair_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("current_protocol") or "")')"
     if [ -n "$pair_protocol" ]; then
-        die "جفت «$PAIR_NAME» قبلاً راه‌اندازی شده (پروتکل جاری: $pair_protocol)؛ برای جفت تازه نامی دیگر بدهید"
+        die "Pair "$PAIR_NAME" is already set up (current protocol: $pair_protocol); give a new pair another name"
     fi
-    info "جفت ثبت شد (شناسه $pair_id)"
-    step "۵) اندازه‌گیری، استقرار تانل اول و نصب نگهبان"
+    info "Pair registered (ID $pair_id)"
+    step "5) Measuring, deploying the first tunnel, and installing the healer"
     local setup_json setup_score setup_status panel_url
     setup_json="$(python3 "$INSTALL_DIR/orchestrator/wizard_setup.py" --iran-host "$iran_ip" --foreign-host "$node" --pair-id "$pair_id" --pair-name "$PAIR_NAME" --hub-db "$HUB_DB" --hub-key "$HUB_KEY" --frontend-port 443 --protocol "$PROTOCOL")" \
-        || die "زنجیره راه‌اندازی ناموفق بود؛ خروجی بالا را ببینید"
+        || die "Setup chain failed; see the output above"
     setup_score="$(echo "$setup_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["score"])')"
     setup_status="$(echo "$setup_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["deploy_status"])')"
     if [ -n "$DOMAIN" ]; then panel_url="https://$DOMAIN:$HUB_PORT"; else panel_url="https://$iran_ip:$HUB_PORT"; fi
     echo
     echo "╔══════════════════════════════════════════════════════╗"
-    echo "║  راه‌اندازی کامل شد                                   ║"
-    echo "║  جفت: $PAIR_NAME                                      ║"
-    echo "║  تانل اول: $PROTOCOL (امتیاز $setup_score، وضعیت $setup_status) ║"
-    echo "║  داشبورد: $panel_url                                 ║"
-    echo "║  قدم بعدی: در صفحه راه‌اندازی داشبورد، حساب اپراتور  ║"
-    echo "║  را بسازید. این اسکریپت به PasarGuard دست نمی‌زند.    ║"
+    echo "║  Full setup complete                                 ║"
+    echo "║  Pair: $PAIR_NAME                                    ║"
+    echo "║  First tunnel: $PROTOCOL (score $setup_score, status $setup_status)║"
+    echo "║  Dashboard: $panel_url                               ║"
+    echo "║  Next: create the operator account on the            ║"
+    echo "║  dashboard setup page. This script never touches PasarGuard.║"
     echo "╚══════════════════════════════════════════════════════╝"
 }
 
-# ── یونیت هاب ───────────────────────────────────────────────────
+# ── Hub unit ───────────────────────────────────────────────────
 write_hub_unit() { # $1=host $2=cert $3=key
     local host="$1" cert="$2" key="$3" tls_args=""
     if [ -n "$cert" ] && [ -n "$key" ]; then
@@ -537,8 +548,8 @@ EOF
 hub_health() { # $1 = http|https
     local scheme="$1" out="" i=0
     systemctl is-active "$UNIT" | grep -qx "active" \
-        || die "سرویس $UNIT بالا نیامد؛ با 'journalctl -u $UNIT -n 50' لاگ را ببینید"
-    # هاب روی VPS کند ممکن است چند ثانیه دیرتر گوش بدهد؛ تا ۳۰ ثانیه تلاش کن
+        || die "Service $UNIT did not come up; check 'journalctl -u $UNIT -n 50'"
+    # On a slow VPS the hub may take a few seconds to listen; retry for up to 30s
     while [ "$i" -lt 15 ]; do
         if [ "$scheme" = "https" ]; then
             out="$(curl -kfsS "https://127.0.0.1:$HUB_PORT/api/health" 2>/dev/null || true)"
@@ -549,15 +560,15 @@ hub_health() { # $1 = http|https
         sleep 2
         i=$((i + 1))
     done
-    [ -n "$out" ] || die "هاب بالا آمده ولی /api/health جواب نداد"
-    info "سلامت هاب: $out"
+    [ -n "$out" ] || die "Hub is up but /api/health did not answer"
+    info "Hub health: $out"
 }
 
 firewall_open_8890() {
-    step "فایروال برای پورت $HUB_PORT"
+    step "Firewall for port $HUB_PORT"
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow "$HUB_PORT/tcp" >/dev/null
-        ok "ufw: پورت $HUB_PORT باز شد"
+        ok "ufw: port $HUB_PORT opened"
         return 0
     fi
     if command -v iptables >/dev/null 2>&1; then
@@ -568,101 +579,103 @@ firewall_open_8890() {
             case "$policy" in
                 *DROP*|*REJECT*)
                     iptables -A INPUT -p tcp --dport "$HUB_PORT" -j ACCEPT
-                    ok "iptables: پورت $HUB_PORT باز شد (سیاست ورودی بسته بود)"
+                    ok "iptables: port $HUB_PORT opened (input policy was closed)"
                     if command -v netfilter-persistent >/dev/null 2>&1; then
                         netfilter-persistent save >/dev/null 2>&1 || true
                     else
-                        warn "netfilter-persistent نیست؛ قانون iptables بعد از ریبوت نمی‌ماند مگر دستی ذخیره شود"
+                        warn "netfilter-persistent is missing; the iptables rule will not survive a reboot unless saved manually"
                     fi
                     ;;
-                *) info "سیاست فایروال باز است؛ قانونی لازم نبود" ;;
+                *) info "Firewall policy is open; no rule was needed" ;;
             esac
         else
-            info "فایروال بسته نیست یا قانون از قبل هست؛ کاری لازم نبود"
+            info "Firewall is not closed or the rule already exists; nothing was needed"
         fi
     else
-        info "ابزار فایروال پیدا نشد؛ فرض بر باز بودن است"
+        info "No firewall tool found; assuming open"
     fi
 }
 
 install_hub() {
-    step "نصب هاب (داشبورد)"
+    step "Installing the hub (dashboard)"
     install_deps hub
     fetch_code
     ensure_hub_key
     write_hub_unit "127.0.0.1" "" ""
     systemctl enable "$UNIT" >/dev/null 2>&1
-    # نکته: enable --now یونیتِ در حال اجرا را ری‌استارت نمی‌کند؛ برای نصب دوباره
-    # حتماً restart لازم است تا کد و تنظیمات تازه واقعاً بالا بیایند
+    # Note: enable --now does not restart a running unit; a reinstall
+    # needs an explicit restart so the fresh code and settings actually come up
     systemctl restart "$UNIT"
     hub_health http
     firewall_open_8890
-    ok "هاب نصب شد؛ فعلاً فقط روی خود سرور (127.0.0.1) در دسترس است"
-    warn "برای باز شدن روی اینترنت، از منو «گواهی پنل» را اجرا کنید (دامنه یا آی‌پی)"
+    ok "Hub installed; for now it is only reachable on this server (127.0.0.1)"
+    warn "To open it to the internet, choose 'Web Panel' from the menu and set a certificate (domain or IP)"
 }
 
 install_node() {
-    step "نصب نود (بدون داشبورد)"
+    step "Installing the node (no dashboard)"
     install_deps node
     fetch_code
-    ok "نود نصب شد: موتور و اسکریپت‌های پروتکل در $INSTALL_DIR"
-    info "این سرور از این به بعد از روی داشبوردِ هاب، با کلید SSH مدیریت می‌شود؛"
-    info "خودش هیچ سرویسی گوش نمی‌دهد و حساب اپراتوری هم اینجا ساخته نمی‌شود."
+    ok "Node installed: engine and protocol scripts in $INSTALL_DIR"
+    info "From now on this server is managed from the hub dashboard over SSH keys;"
+    info "it listens on no service itself, and no operator account is created here."
 }
 
-# ── جریان اتصال نود (join) ─────────────────────────────────────
-# روش کاریز/اسمیت: مستر یک دستور یک‌خطی می‌دهد، نود آن را پیست می‌کند.
-# هیچ آی‌پی‌ای تایپ نمی‌شود: آدرس نود از مبدا درخواست خوانده می‌شود و
-# آدرس مستر هم از همان گواهی‌اش می‌آید. اعتماد به کانال هم کور نیست:
-# اثر انگشت گواهی مستر در خود دستور اتصال است و نود پیش از فرستادن کد،
-# گواهی دریافتی را با همان اثر انگشت می‌سنجد، بعد همان گواهیِ تاییدشده
-# را به‌عنوان CA برای درخواست اتصال استفاده می‌کند.
-norm_fp() { # $1=fingerprint -> 64 کاراکتر هگز بزرگ، بدون جداکننده
+# ── Node join flow ─────────────────────────────────────
+# Kariz/Smite-style: the master gives a one-line command, the
+# node pastes it. No IP is typed: the node address is read from
+# the request origin and the master address comes from its own
+# certificate. Trust in the channel is not blind either: the
+# master certificate fingerprint is inside the join command itself,
+# and the node checks the received certificate against that
+# fingerprint before sending the code, then uses that verified
+# certificate as the CA for the join request.
+norm_fp() { # $1=fingerprint -> 64 uppercase hex chars, no separators
     echo "$1" | tr -d ' :\t' | sed 's/^SHA256Fingerprint=//I' | tr 'a-f' 'A-F'
 }
 
-active_hub_cert() { # مسیر گواهی فعلی هاب از روی یونیت، یا خالی
+active_hub_cert() { # Current hub certificate path from the unit, or empty
     systemctl cat "$UNIT" 2>/dev/null | grep -o -- '--tls-cert [^ ]*' | awk '{print $2}' | head -1
 }
 
 print_join_command() {
-    [ -f "$INSTALL_DIR/hub/main.py" ] || die "هاب روی این سرور نصب نیست"
-    [ -f "$HUB_PUB" ] || die "کلید هاب نیست؛ اول هاب را نصب کنید"
+    [ -f "$INSTALL_DIR/hub/main.py" ] || die "Hub is not installed on this server"
+    [ -f "$HUB_PUB" ] || die "No hub key; install the hub first"
     local cert host token fp
     cert="$(active_hub_cert)"
-    [ -n "$cert" ] || die "هاب هنوز گواهی ندارد (فقط لوکال است)؛ اول از منو «گواهی پنل» را اجرا کنید، بعد دوباره دستور اتصال را بگیرید"
+    [ -n "$cert" ] || die "Hub has no certificate yet (local only); set a certificate from 'Web Panel' in the menu first, then get the join command again"
     case "$cert" in
         /etc/letsencrypt/live/*/fullchain.pem)
             host="$(echo "$cert" | cut -d/ -f5)" ;;
         *) host="$(public_ip)" ;;
     esac
-    [ -n "$host" ] && [ "$host" != "نامشخص" ] || die "آدرس مستر پیدا نشد"
-    token="$(cd "$INSTALL_DIR" && python3 -m hub.join generate)" || die "ساخت کد اتصال ناموفق بود"
+    [ -n "$host" ] && [ "$host" != "unknown" ] || die "Master address not found"
+    token="$(cd "$INSTALL_DIR" && python3 -m hub.join generate)" || die "Generating the join code failed"
     fp="$(norm_fp "$(cert_fingerprint "$cert")")"
     echo
-    echo "دستور اتصال نود — این یک خط را روی سرور نود پیست کنید:"
+    echo "Node join command — paste this one line on the node server:"
     echo "curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh && bash /tmp/install-rahyaab.sh --join $host $token $fp"
     echo
-    warn "این کد فقط یک بار مصرف می‌شود؛ با چاپ دوباره، کد قبلی می‌سوزد"
+    warn "This code is single-use; printing a new one invalidates the old one"
 }
 
-verify_master_cert() { # $1=host $2=expected-fp (نرمال‌شده)
+verify_master_cert() { # $1=host $2=expected-fp (normalized)
     local host="$1" expected="$2" cert_pem="/tmp/rahyaab-master-cert.pem" actual
     echo | openssl s_client -connect "$host:$HUB_PORT" -servername "$host" 2>/dev/null \
         | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$cert_pem"
-    [ -s "$cert_pem" ] || die "ارتباط امن با مستر برقرار نشد ($host:$HUB_PORT)"
+    [ -s "$cert_pem" ] || die "Secure connection to the master failed ($host:$HUB_PORT)"
     actual="$(norm_fp "$(cert_fingerprint "$cert_pem")")"
-    [ "$actual" = "$expected" ] || die "اثر انگشت گواهی مستر با دستور اتصال نمی‌خواند؛ دستور تازه از مستر بگیرید (شاید گواهی عوض شده باشد، یا کسی وسط راه باشد)"
-    ok "گواهی مستر راستی‌آزمایی شد"
+    [ "$actual" = "$expected" ] || die "Master certificate fingerprint does not match the join command; get a fresh command from the master (the certificate may have changed, or someone may be in the middle)"
+    ok "Master certificate verified"
 }
 
 node_join() { # $1=host $2=token $3=fingerprint
     local host="$1" token="$2" fp
     fp="$(norm_fp "$3")"
-    [ -n "$host" ] || die "آدرس مستر لازم است"
-    [[ "$token" =~ ^[0-9a-f]{32}$ ]] || die "کد اتصال نامعتبر است (باید ۳۲ کاراکتر هگز باشد)"
-    [[ "$fp" =~ ^[0-9A-F]{64}$ ]] || die "اثر انگشت نامعتبر است (باید ۶۴ کاراکتر هگز باشد)"
-    step "نصب نود و اتصال به مستر $host"
+    [ -n "$host" ] || die "Master address is required"
+    [[ "$token" =~ ^[0-9a-f]{32}$ ]] || die "Invalid join code (must be 32 hex characters)"
+    [[ "$fp" =~ ^[0-9A-F]{64}$ ]] || die "Invalid fingerprint (must be 64 hex characters)"
+    step "Installing the node and joining master $host"
     install_deps node
     fetch_code
     enable_bbr
@@ -672,27 +685,27 @@ node_join() { # $1=host $2=token $3=fingerprint
     for k in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
         if [ -f "$k" ]; then key_file="$k"; break; fi
     done
-    [ -n "$key_file" ] || die "کلید هاست SSH روی این سرور نیست (sshd نصب نیست؟)؛ اول openssh-server را نصب کنید"
+    [ -n "$key_file" ] || die "No SSH host key on this server (is sshd installed?); install openssh-server first"
     read -r ktype kb64 _ < "$key_file"
     local json resp code body err hub_pub
     json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" python3 -c 'import json,os; print(json.dumps({"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"]}))')"
     resp="$(curl -sS --max-time 30 --cacert /tmp/rahyaab-master-cert.pem -X POST "https://$host:$HUB_PORT/api/join" -H 'Content-Type: application/json' --data "$json" -w $'\n%{http_code}')" \
-        || die "ارتباط با مستر برقرار نشد ($host:$HUB_PORT)"
+        || die "Connection to the master failed ($host:$HUB_PORT)"
     code="${resp##*$'\n'}"
     body="${resp%$'\n'*}"
     if [ "$code" != "201" ]; then
         err="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",""))' 2>/dev/null || echo "$body")"
-        die "مستر اتصال را رد کرد (کد $code): $err"
+        die "Master rejected the join (code $code): $err"
     fi
     hub_pub="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hub_pubkey"])')" \
-        || die "پاسخ مستر خوانا نبود"
+        || die "Master response was unreadable"
     mkdir -p /root/.ssh && chmod 700 /root/.ssh
     touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
     grep -qF "$hub_pub" /root/.ssh/authorized_keys || echo "$hub_pub" >> /root/.ssh/authorized_keys
-    ok "نود به مستر وصل شد؛ ساخت جفت و تانل روی مستر در پس‌زمینه شروع شد؛ چند دقیقه بعد داشبورد مستر را ببینید"
+    ok "Node joined the master; pair and tunnel creation started in the background on the master; check the master dashboard in a few minutes"
 }
 
-parse_join_input() { # $1=دستور پیست‌شده -> JOIN_HOST/JOIN_TOKEN/JOIN_FP
+parse_join_input() { # $1=pasted command -> JOIN_HOST/JOIN_TOKEN/JOIN_FP
     local rest
     if [[ "$1" == *"--join"* ]]; then
         rest="${1##*--join }"
@@ -701,36 +714,36 @@ parse_join_input() { # $1=دستور پیست‌شده -> JOIN_HOST/JOIN_TOKEN/J
     fi
     read -r JOIN_HOST JOIN_TOKEN JOIN_FP _ <<< "$rest"
     [ -n "$JOIN_HOST" ] && [ -n "$JOIN_TOKEN" ] && [ -n "$JOIN_FP" ] \
-        || die "دستور اتصال ناقص است؛ باید آدرس مستر، کد و اثر انگشت را داشته باشد"
+        || die "Join command is incomplete; it must have the master address, code, and fingerprint"
 }
 
 node_join_flow() {
-    echo "دستور اتصال مستر را که روی مستر چاپ شده، اینجا پیست کنید"
-    echo "(یا فقط سه تکه‌اش را: آدرس مستر، کد، اثر انگشت)"
+    echo "Paste the master join command printed on the master here"
+    echo "(or just its three parts: master address, code, fingerprint)"
     local pasted
-    read -r -p "دستور اتصال: " pasted
+    read -r -p "Join command: " pasted
     parse_join_input "$pasted"
     node_join "$JOIN_HOST" "$JOIN_TOKEN" "$JOIN_FP"
 }
 
 master_setup_flow() {
-    step "نصب مستر (هاب)"
+    step "Installing the master (hub)"
     install_hub
     enable_bbr
     if [ -z "$DOMAIN" ] && [ "$IP_CERT" -eq 0 ] && [ -z "$CERT_PATH" ]; then
         if [ "$YES" -eq 0 ]; then
             echo
-            echo "گواهی پنل را هم همین حالا بسازم؟"
-            echo "  1) دامنه   2) آی‌پی   3) بعداً (فقط لوکال می‌ماند)"
+            echo "Create the panel certificate now too?"
+            echo "  1) Domain   2) IP   3) Later (local only)"
             local g
-            read -r -p "انتخاب: " g
+            read -r -p "Select: " g
             case "$g" in
                 1) cert_domain ;;
                 2) cert_ip ;;
-                *) warn "هاب فقط روی لوکال است؛ پیش از باز کردن روی اینترنت، گواهی بگیرید" ;;
+                *) warn "Hub is local-only; get a certificate before opening it to the internet" ;;
             esac
         else
-            warn "گواهی انتخاب نشده؛ هاب فقط روی لوکال است"
+            warn "No certificate selected; hub is local-only"
         fi
     else
         if [ -n "$DOMAIN" ]; then cert_domain; fi
@@ -739,27 +752,27 @@ master_setup_flow() {
     fi
     local iran_ip="$IRAN_HOST"
     [ -z "$iran_ip" ] && iran_ip="$(public_ip)"
-    [ -n "$iran_ip" ] && [ "$iran_ip" != "نامشخص" ] || die "آی‌پی این سرور پیدا نشد؛ با ‎--iran-host بدهید"
+    [ -n "$iran_ip" ] && [ "$iran_ip" != "unknown" ] || die "Could not find this server's IP; pass it with --iran-host"
     if [ "$YES" -eq 0 ]; then
-        ask IRAN_HOST "آی‌پی این سرور (مستر)" "$iran_ip"
+        ask IRAN_HOST "IP of this server (master)" "$iran_ip"
         iran_ip="$IRAN_HOST"
     fi
-    step "ثبت مستر در دیتابیس هاب"
+    step "Registering the master in the hub database"
     (cd "$INSTALL_DIR" && python3 -m hub.wizard --db "$HUB_DB" --self-host "$iran_ip") \
-        || die "ثبت مستر ناموفق بود"
+        || die "Registering the master failed"
     if [ -n "$(active_hub_cert)" ]; then
         print_join_command
     else
-        warn "چون گواهی ندارید، دستور اتصال چاپ نشد؛ بعد از گرفتن گواهی، از منو «نمایش دستور اتصال نود» را اجرا کنید"
+        warn "No certificate, so no join command was printed; after getting a certificate, run 'Print join command' under 'Manage' in the menu"
     fi
     summary
 }
 
 # ── BBR ─────────────────────────────────────────────────────────
 enable_bbr() {
-    step "فعال‌سازی BBR"
+    step "Enabling BBR"
     if ! modprobe tcp_bbr 2>/dev/null; then
-        warn "ماژول tcp_bbr بار نشد (روی بعضی VPSها کرنل اجازه نمی‌دهد)؛ باز هم تلاش می‌کنیم"
+        warn "tcp_bbr module did not load (some VPS kernels forbid it); trying anyway"
     fi
     cat > /etc/sysctl.d/99-rahyaab-bbr.conf <<EOF
 # Rahyaab: BBR congestion control + fq queueing
@@ -768,15 +781,15 @@ net.ipv4.tcp_congestion_control = bbr
 EOF
     sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-rahyaab-bbr.conf
     local cur
-    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'نامشخص')"
+    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
     if [ "$cur" = "bbr" ]; then
-        ok "BBR فعال شد (tcp_congestion_control=bbr)"
+        ok "BBR enabled (tcp_congestion_control=bbr)"
     else
-        warn "BBR تنظیم شد ولی مقدار فعلی '$cur' است؛ بعد از ریبوت دوباره چک کنید"
+        warn "BBR is set but the current value is '$cur'; check again after reboot"
     fi
 }
 
-# ── گواهی ────────────────────────────────────────────────────────
+# ── Certificates ────────────────────────────────────────────────────────
 hub_installed() {
     [ -f "/etc/systemd/system/$UNIT.service" ]
 }
@@ -797,69 +810,69 @@ cert_fingerprint() { # $1=cert
 }
 
 cert_domain() {
-    step "گواهی Let's Encrypt برای دامنه"
-    hub_installed || die "اول هاب را نصب کنید (گزینه ۱)، بعد گواهی بگیرید"
+    step "Let's Encrypt certificate for a domain"
+    hub_installed || die "Install the hub first, then get a certificate"
     if [ -z "$DOMAIN" ]; then
-        ask DOMAIN "دامنه پنل (مثل panel.example.com)"
+        ask DOMAIN "Panel domain (e.g. panel.example.com)"
     fi
     if [ -z "$EMAIL" ]; then
-        ask EMAIL "ایمیل برای certbot"
+        ask EMAIL "Email for certbot"
     fi
-    [ -n "$DOMAIN" ] && [ -n "$EMAIL" ] || die "دامنه و ایمیل لازم است"
+    [ -n "$DOMAIN" ] && [ -n "$EMAIL" ] || die "Domain and email are required"
     if ss -ltn 2>/dev/null | grep -q ':80 '; then
-        die "پورت ۸۰ اشغال است؛ certbot حالت standalone به پورت ۸۰ خالی نیاز دارد"
+        die "Port 80 is busy; certbot standalone mode needs a free port 80"
     fi
-    info "دامنه باید از اینترنت به همین سرور برسد، وگرنه اعتبارسنجی رد می‌شود"
+    info "The domain must reach this server from the internet, or validation will fail"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq certbot
     certbot certonly --standalone --non-interactive --agree-tos \
         --email "$EMAIL" -d "$DOMAIN" \
-        || die "صدور گواهی ناموفق بود؛ DNS دامنه و باز بودن پورت ۸۰ را چک کنید"
+        || die "Issuing the certificate failed; check the domain DNS and that port 80 is open"
     local cert="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
     local key="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     cat > /etc/letsencrypt/renewal-hooks/deploy/rahyaab-hub.sh <<EOF
 #!/bin/sh
-# پس از هر تمدید موفق، هاب را ری‌استارت کن تا گواهی تازه را بگیرد.
+# After each successful renewal, restart the hub so it picks up the new certificate.
 if systemctl is-active -q $UNIT; then
     systemctl restart $UNIT
 fi
 EOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/rahyaab-hub.sh
     apply_tls_to_hub "$cert" "$key"
-    ok "گواهی دامنه فعال شد؛ تمدید خودکار با تایمر certbot انجام می‌شود"
-    info "انقضا: $(cert_expiry "$cert")"
-    info "آدرس پنل: https://$DOMAIN:$HUB_PORT"
+    ok "Domain certificate activated; auto-renewal runs on the certbot timer"
+    info "Expiry: $(cert_expiry "$cert")"
+    info "Panel address: https://$DOMAIN:$HUB_PORT"
 }
 
 cert_ip() {
-    step "گواهی آی‌پی (self-signed + تمدید خودکار)"
-    hub_installed || die "اول هاب را نصب کنید (گزینه ۱)، بعد گواهی بگیرید"
+    step "IP certificate (self-signed + auto-renewal)"
+    hub_installed || die "Install the hub first, then get a certificate"
     local ip cert key
     ip="$(public_ip)"
-    if [ "$ip" = "نامشخص" ]; then
-        ask ip "آی‌پی عمومی سرور"
+    if [ "$ip" = "unknown" ]; then
+        ask ip "Server public IP"
     fi
     cert="$CONF_DIR/tls/cert.pem"
     key="$CONF_DIR/tls/key.pem"
     mkdir -p "$CONF_DIR/tls"
     if [ -f "$cert" ] && [ -f "$key" ]; then
         if openssl x509 -in "$cert" -noout -checkend 2592000 >/dev/null 2>&1; then
-            info "گواهی موجود هنوز بیش از ۳۰ روز اعتبار دارد؛ همان می‌ماند"
+            info "Existing certificate is still valid for more than 30 days; keeping it"
         else
-            info "گواهی موجود رو به انقضاست؛ تازه ساخته می‌شود"
+            info "Existing certificate is close to expiry; generating a fresh one"
             rm -f "$cert" "$key"
         fi
     fi
     if [ ! -f "$cert" ]; then
-        openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 825 -nodes -subj "/CN=$ip" -addext "subjectAltName=IP:$ip" || die "ساخت گواهی ناموفق بود"
+        openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 825 -nodes -subj "/CN=$ip" -addext "subjectAltName=IP:$ip" || die "Generating the certificate failed"
         chmod 600 "$key"; chmod 644 "$cert"
-        ok "گواهی self-signed برای آی‌پی $ip ساخته شد (۸۲۵ روز)"
+        ok "Self-signed certificate for IP $ip created (825 days)"
     fi
     cat > /usr/local/bin/rahyaab-renew-ip-cert.sh <<EOF
 #!/bin/sh
-# اگر گواهی آی‌پی کمتر از ۳۰ روز اعتبار داشت، تازه بساز و هاب را ری‌استارت کن.
+# If the IP certificate has less than 30 days left, regenerate it and restart the hub.
 CERT="$cert"
 KEY="$key"
 IP="$ip"
@@ -895,67 +908,67 @@ EOF
     systemctl daemon-reload
     systemctl enable --now rahyaab-cert-renew.timer
     apply_tls_to_hub "$cert" "$key"
-    ok "گواهی آی‌پی فعال شد؛ تایمر روزانه پیش از انقضا خودش تمدید می‌کند"
-    info "اثر انگشت (با مرورگر مقایسه کنید): $(cert_fingerprint "$cert")"
-    info "انقضا: $(cert_expiry "$cert")"
-    info "آدرس پنل: https://$ip:$HUB_PORT"
-    warn "گواهی self-signed است؛ مرورگر بار اول هشدار می‌دهد تا تاییدش کنید"
+    ok "IP certificate activated; the daily timer renews it before expiry"
+    info "Fingerprint (compare with the browser): $(cert_fingerprint "$cert")"
+    info "Expiry: $(cert_expiry "$cert")"
+    info "Panel address: https://$ip:$HUB_PORT"
+    warn "Certificate is self-signed; the browser will warn once until you approve it"
 }
 
 cert_custom() {
-    step "گواهی آماده خودتان"
-    hub_installed || die "اول هاب را نصب کنید (گزینه ۱)، بعد گواهی بدهید"
-    if [ -z "$CERT_PATH" ]; then ask CERT_PATH "مسیر فایل گواهی (fullchain.pem)"; fi
-    if [ -z "$KEY_PATH" ]; then ask KEY_PATH "مسیر فایل کلید (privkey.pem)"; fi
-    [ -f "$CERT_PATH" ] || die "فایل گواهی پیدا نشد: $CERT_PATH"
-    [ -f "$KEY_PATH" ] || die "فایل کلید پیدا نشد: $KEY_PATH"
+    step "Your own ready certificate"
+    hub_installed || die "Install the hub first, then set a certificate"
+    if [ -z "$CERT_PATH" ]; then ask CERT_PATH "Certificate file path (fullchain.pem)"; fi
+    if [ -z "$KEY_PATH" ]; then ask KEY_PATH "Key file path (privkey.pem)"; fi
+    [ -f "$CERT_PATH" ] || die "Certificate file not found: $CERT_PATH"
+    [ -f "$KEY_PATH" ] || die "Key file not found: $KEY_PATH"
     apply_tls_to_hub "$CERT_PATH" "$KEY_PATH"
-    ok "گواهی خودتان فعال شد"
-    info "انقضا: $(cert_expiry "$CERT_PATH")"
+    ok "Your certificate is activated"
+    info "Expiry: $(cert_expiry "$CERT_PATH")"
 }
 
 cert_menu() {
     echo
-    echo "گواهی پنل:"
-    echo "  1) دامنه — Let's Encrypt واقعی + تمدید خودکار"
-    echo "  2) آی‌پی — self-signed + تمدید خودکار (مرورگر بار اول هشدار می‌دهد)"
-    echo "  3) گواهی آماده خودم (مسیر فایل‌ها را می‌دهم)"
-    echo "  0) برگشت"
+    echo "Panel certificate:"
+    echo "  1) Domain — real Let's Encrypt + auto-renewal"
+    echo "  2) IP — self-signed + auto-renewal (browser warns once)"
+    echo "  3) My own ready certificate (I will give the file paths)"
+    echo "  0) Back"
     local c
-    read -r -p "انتخاب: " c
+    read -r -p "Select: " c
     case "$c" in
         1) cert_domain ;;
         2) cert_ip ;;
         3) cert_custom ;;
         0) return 0 ;;
-        *) warn "انتخاب نامعتبر" ;;
+        *) warn "Invalid selection" ;;
     esac
 }
 
-# ── وضعیت، به‌روزرسانی، حذف ─────────────────────────────────────
+# ── Status, update, uninstall ─────────────────────────────────────
 show_status() {
-    step "وضعیت رهیاب روی این سرور"
-    echo "هاب:       $(systemctl is-active "$UNIT" 2>/dev/null || echo 'نصب نیست')"
+    step "Rahyaab status on this server"
+    echo "Hub:       $(systemctl is-active "$UNIT" 2>/dev/null || echo 'not installed')"
     if hub_installed; then
         grep -o 'ExecStart=.*' "/etc/systemd/system/$UNIT.service" | cut -c1-160
     fi
-    echo "BBR:       $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'نامشخص')"
+    echo "BBR:       $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
     if [ -f "$CONF_DIR/tls/cert.pem" ]; then
-        echo "گواهی آی‌پی: انقضا $(cert_expiry "$CONF_DIR/tls/cert.pem")"
+        echo "IP certificate: expires $(cert_expiry "$CONF_DIR/tls/cert.pem")"
     fi
     local d
     for d in /etc/letsencrypt/live/*/; do
         [ -d "$d" ] || continue
-        echo "گواهی دامنه: ${d} انقضا $(cert_expiry "${d}fullchain.pem" 2>/dev/null || echo '?')"
+        echo "Domain certificate: ${d} expires $(cert_expiry "${d}fullchain.pem" 2>/dev/null || echo '?')"
     done
-    echo "آی‌پی عمومی: $(public_ip)"
-    echo "کد:        $INSTALL_DIR"
-    echo "داده:      $DATA_DIR"
+    echo "Public IP: $(public_ip)"
+    echo "Code:      $INSTALL_DIR"
+    echo "Data:      $DATA_DIR"
 }
 
 update_code() {
-    step "به‌روزرسانی کد رهیاب"
-    [ -d "$INSTALL_DIR" ] || die "رهیاب نصب نیست؛ اول گزینه نصب را بزنید"
+    step "Updating Rahyaab code"
+    [ -d "$INSTALL_DIR" ] || die "Rahyaab is not installed; pick an install option first"
     fetch_code
     if hub_installed && systemctl is-active -q "$UNIT"; then
         systemctl restart "$UNIT"
@@ -965,13 +978,13 @@ update_code() {
             hub_health http
         fi
     fi
-    ok "کد به‌روز شد؛ دیتابیس و گواهی‌ها دست نخوردند"
+    ok "Code updated; database and certificates untouched"
 }
 
 uninstall() {
-    step "حذف رهیاب"
-    warn "سرویس‌های رهیاب متوقف و کد پاک می‌شود"
-    confirm || { info "لغو شد"; return 0; }
+    step "Uninstalling Rahyaab"
+    warn "Rahyaab services will stop and the code will be removed"
+    confirm || { info "Cancelled"; return 0; }
     systemctl stop "$UNIT" 2>/dev/null || true
     systemctl disable "$UNIT" 2>/dev/null || true
     systemctl stop rahyaab-cert-renew.timer 2>/dev/null || true
@@ -983,111 +996,246 @@ uninstall() {
     systemctl daemon-reload
     rm -rf "$INSTALL_DIR"
     local ans
-    read -r -p "داده‌ها و گواهی‌ها هم پاک شود؟ (دیتابیس هاب، حساب‌ها، جفت‌ها) [y/N] " ans
+    read -r -p "Also remove data and certificates? (hub database, accounts, pairs) [y/N] " ans
     case "$ans" in
         [yY]|[yY][eE][sS])
             rm -rf "$DATA_DIR" "$CONF_DIR"
-            ok "همه‌چیز پاک شد"
+            ok "Everything removed"
             ;;
-        *) info "داده‌ها نگه داشته شد: $DATA_DIR و $CONF_DIR" ;;
+        *) info "Data kept: $DATA_DIR and $CONF_DIR" ;;
     esac
-    ok "حذف انجام شد"
+    ok "Uninstall complete"
 }
 
 summary() {
     echo
     echo -e "${C_GREEN}╔══════════════════════════════════════════════════════╗${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  نصب تمام شد — قدم‌های بعدی:                            ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  ۱) داشبورد را باز کنید و حساب اپراتور را بسازید         ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  ۲) سرورها را اضافه کنید، بنچمارک بگیرید، جفت بسازید      ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  ۳) نگهبان را از داخل داشبورد فعال کنید                   ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  توجه: این اسکریپت به PasarGuard دست نمی‌زند.             ${C_GREEN}║${C_RESET}"
+    echo -e "${C_GREEN}║${C_RESET}  Install complete — next steps:                      ${C_GREEN}║${C_RESET}"
+    echo -e "${C_GREEN}║${C_RESET}  1) Open the dashboard, create the operator account  ${C_GREEN}║${C_RESET}"
+    echo -e "${C_GREEN}║${C_RESET}  2) Add servers, benchmark, and build the pair       ${C_GREEN}║${C_RESET}"
+    echo -e "${C_GREEN}║${C_RESET}  3) Enable the healer from inside the dashboard      ${C_GREEN}║${C_RESET}"
+    echo -e "${C_GREEN}║${C_RESET}  Note: this script never touches PasarGuard.         ${C_GREEN}║${C_RESET}"
     echo -e "${C_GREEN}╚══════════════════════════════════════════════════════╝${C_RESET}"
 }
 
-# ── منو و اجرا ───────────────────────────────────────────────────
+# ── Backup & Restore, Web Panel, Optimize ──────────────────────────────
+create_backup() {
+    step "Creating a backup"
+    hub_installed || { warn "Hub is not installed; nothing to back up"; return 0; }
+    [ -f "$HUB_DB" ] || { warn "Hub database not found ($HUB_DB); nothing to back up"; return 0; }
+    local tmp backup stamp
+    tmp="$(mktemp -d)"
+    python3 - "$HUB_DB" "$tmp/hub.db" <<'PYBACKUP' || { warn "Database backup failed; nothing was changed"; rm -rf "$tmp"; return 0; }
+import sqlite3
+import sys
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close()
+src.close()
+PYBACKUP
+    mkdir -p "$tmp/data" "$tmp/conf"
+    cp -a "$DATA_DIR/." "$tmp/data/" 2>/dev/null || { warn "Could not read hub data ($DATA_DIR)"; rm -rf "$tmp"; return 0; }
+    cp -f "$tmp/hub.db" "$tmp/data/hub.db"
+    cp -a "$CONF_DIR/." "$tmp/conf/" 2>/dev/null || { warn "Could not read hub configuration ($CONF_DIR)"; rm -rf "$tmp"; return 0; }
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    backup="/root/rahyaab-backup-$stamp.tar.gz"
+    tar -czf "$backup" -C "$tmp" data conf || { warn "Could not write $backup"; rm -rf "$tmp"; return 0; }
+    rm -rf "$tmp"
+    ok "Backup created: $backup"
+    info "Keep this file private: it contains the hub key and certificates"
+}
+
+restore_backup() {
+    step "Restoring a backup"
+    local file ans tmp health_scheme
+    read -r -p "Backup file path: " file
+    [ -f "$file" ] || { warn "Backup file not found: $file"; return 0; }
+    warn "This overwrites the current hub data and certificates."
+    read -r -p "Restore this backup? [y/N] " ans
+    case "$ans" in
+        [yY]|[yY][eE][sS]) ;;
+        *) info "Cancelled"; return 0 ;;
+    esac
+    tmp="$(mktemp -d)"
+    tar -xzf "$file" -C "$tmp" || { warn "Could not read $file"; rm -rf "$tmp"; return 0; }
+    [ -d "$tmp/data" ] && [ -d "$tmp/conf" ] || { warn "Not a Rahyaab backup (no data/conf inside): $file"; rm -rf "$tmp"; return 0; }
+    systemctl stop "$UNIT" 2>/dev/null || true
+    mkdir -p "$DATA_DIR" "$CONF_DIR"
+    cp -a "$tmp/data/." "$DATA_DIR/"
+    cp -a "$tmp/conf/." "$CONF_DIR/"
+    rm -rf "$tmp"
+    if hub_installed; then
+        if systemctl restart "$UNIT"; then
+            if grep -q 'tls-cert' "/etc/systemd/system/$UNIT.service"; then
+                health_scheme=https
+            else
+                health_scheme=http
+            fi
+            if (hub_health "$health_scheme"); then
+                ok "Restore complete; hub health verified"
+            else
+                warn "Restore extracted but the hub health check failed"
+            fi
+        else
+            warn "Restore extracted but the hub failed to restart"
+        fi
+    else
+        warn "Hub service is not installed; data restored but nothing was restarted"
+    fi
+}
+
+backup_menu() {
+    while true; do
+        echo
+        echo "Backup & Restore:"
+        echo -e "  ${C_YELLOW}1)${C_RESET} Create backup   Back up hub data and certificates"
+        echo -e "  ${C_YELLOW}2)${C_RESET} Restore backup  Restore hub data and certificates from a backup file"
+        echo -e "  ${C_YELLOW}0)${C_RESET} Back"
+        local c
+        read -r -p "Select an option: " c
+        case "$c" in
+            1) create_backup ;;
+            2) restore_backup ;;
+            0) return 0 ;;
+            *) warn "Invalid selection" ;;
+        esac
+    done
+}
+
+web_panel_info() {
+    step "Web Panel"
+    if hub_installed; then
+        echo "Hub:       $(systemctl is-active "$UNIT" 2>/dev/null || true)"
+    else
+        echo "Hub:       not installed"
+    fi
+    local cert host
+    cert=""
+    if hub_installed; then
+        cert="$(active_hub_cert)"
+    fi
+    if [ -n "$cert" ]; then
+        case "$cert" in
+            /etc/letsencrypt/live/*/fullchain.pem)
+                host="$(echo "$cert" | cut -d/ -f5)" ;;
+            *) host="$(public_ip)" ;;
+        esac
+        echo "Panel address: https://$host:$HUB_PORT"
+        echo "Certificate:   $(cert_fingerprint "$cert")"
+        echo "Expiry:        $(cert_expiry "$cert")"
+    else
+        echo "Panel: local only (no certificate yet)"
+    fi
+    cert_menu
+}
+
+optimize() {
+    step "Optimize"
+    local before after
+    before="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
+    echo "Congestion control before: $before"
+    enable_bbr
+    cat > /etc/sysctl.d/99-rahyaab.conf <<EOF
+# Rahyaab: TCP buffer tuning (persistent)
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.core.netdev_max_backlog=5000
+EOF
+    sysctl -p /etc/sysctl.d/99-rahyaab.conf || warn "Some TCP settings were not applied; check them after a reboot"
+    after="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
+    echo "Congestion control after: $after"
+    ok "Optimization applied (BBR + TCP buffers; settings persist across reboots)"
+}
+
+# ── Menus and entry ───────────────────────────────────────────────────
 management_menu() {
     while true; do
         echo
-        echo "رهیاب — چه کاری انجام شود؟"
-        echo "  1) نصب هاب (داشبورد) روی این سرور"
-        echo "  2) نصب نود (بدون داشبورد)"
-        echo "  3) فعال‌سازی BBR"
-        echo "  4) گواهی پنل (دامنه / آی‌پی / آماده)"
-        echo "  5) به‌روزرسانی کد رهیاب"
-        echo "  6) نمایش وضعیت"
-        echo "  7) حذف رهیاب"
-        echo "  8) نصب کلید هاب روی نود (با پسورد یک‌باره)"
-        echo "  9) نصب نود روی سرور دیگر از همین‌جا (با کلید هاب)"
-        echo "  10) راه‌اندازی کامل دو سرور (ویزارد: هاب + نود + تانل + نگهبان)"
-        echo "  11) نمایش دستور اتصال نود (روی مستر)"
-        echo "  0) خروج"
+        echo "Manage:"
+    echo -e "  ${C_YELLOW}1)${C_RESET} Install hub         Dashboard on this server"
+    echo -e "  ${C_YELLOW}2)${C_RESET} Install node        Engine only, no dashboard"
+    echo -e "  ${C_YELLOW}3)${C_RESET} Show status         Hub, BBR, certificates, paths"
+    echo -e "  ${C_YELLOW}4)${C_RESET} Push hub key        Install the hub key on a node (one-time root password)"
+    echo -e "  ${C_YELLOW}5)${C_RESET} Install remote node Install a node from here over the hub key"
+    echo -e "  ${C_YELLOW}6)${C_RESET} Full setup          Hub + node + pair + first tunnel + healer, one command"
+    echo -e "  ${C_YELLOW}7)${C_RESET} Print join command  Fresh single-use node join command (master only)"
+    echo -e "  ${C_YELLOW}0)${C_RESET} Back"
         local c
-        read -r -p "انتخاب: " c
+        read -r -p "Select an option: " c
         case "$c" in
             1)
                 install_hub
                 echo
-                echo "گواهی پنل را هم همین حالا بسازم؟"
-                echo "  1) دامنه   2) آی‌پی   3) بعداً (فقط لوکال می‌ماند)"
+                echo "Create the panel certificate now too?"
+                echo "  1) Domain   2) IP   3) Later (local only)"
                 local g
-                read -r -p "انتخاب: " g
+                read -r -p "Select: " g
                 case "$g" in
                     1) cert_domain ;;
                     2) cert_ip ;;
-                    *) warn "هاب فقط روی لوکال است؛ پیش از باز کردن روی اینترنت، گواهی بگیرید" ;;
+                    *) warn "Hub is local-only; get a certificate before opening it to the internet" ;;
                 esac
                 summary
                 ;;
             2) install_node ;;
-            3) enable_bbr ;;
-            4) cert_menu ;;
-            5) update_code ;;
-            6) show_status ;;
-            7) uninstall ;;
-            8)
+            3) show_status ;;
+            4)
                 local node
-                read -r -p "هاست نود (آی‌پی یا دامنه): " node
+                read -r -p "Node host (IP or domain): " node
                 push_key "$node"
                 ;;
-            9)
+            5)
                 local node
-                read -r -p "هاست نود (آی‌پی یا دامنه): " node
+                read -r -p "Node host (IP or domain): " node
                 install_node_remote "$node"
                 ;;
-            10)
+            6)
                 local node pair
-                read -r -p "هاست نود (آی‌پی یا دامنه): " node
-                read -r -p "نام جفت [جفت اصلی]: " pair
+                read -r -p "Node host (IP or domain): " node
+                read -r -p "Pair name [$PAIR_NAME]: " pair
                 FULL_SETUP_NODE="$node"
                 PAIR_NAME="${pair:-جفت اصلی}"
                 BBR=1
                 IP_CERT=1
                 full_setup "$node"
                 ;;
-            11) print_join_command ;;
-            0) info "خدانگهدار"; return 0 ;;
-            *) warn "انتخاب نامعتبر" ;;
+            7) print_join_command ;;
+            0) return 0 ;;
+            *) warn "Invalid selection" ;;
         esac
     done
 }
 
 menu() {
-    echo
-    echo "رهیاب — این سرور مستر است یا نود؟"
-    echo "  1) مستر (داشبورد و مدیریت؛ در پایان دستور اتصال نود را می‌دهد)"
-    echo "  2) نود (با دستور اتصال به مستر وصل می‌شود)"
-    echo "  3) مدیریت نصب فعلی (به‌روزرسانی، وضعیت، گواهی، حذف، ...)"
-    echo "  0) خروج"
-    local c
-    read -r -p "انتخاب: " c
-    case "$c" in
-        1) master_setup_flow ;;
-        2) node_join_flow ;;
-        3) management_menu ;;
-        0) info "خدانگهدار"; return 0 ;;
-        *) die "انتخاب نامعتبر" ;;
-    esac
+    while true; do
+        echo
+        echo -e "  ${C_YELLOW}1)${C_RESET} Setup Iran        Install hub + certificate + register master + print join command"
+        echo -e "  ${C_YELLOW}2)${C_RESET} Setup Kharej      Paste join command, install node, join master"
+        echo -e "  ${C_YELLOW}3)${C_RESET} Manage            Install hub/node, status, push key, remote node, full setup, join command"
+        echo -e "  ${C_YELLOW}4)${C_RESET} Backup & Restore  Create or restore a backup of hub data and certificates"
+        echo -e "  ${C_YELLOW}5)${C_RESET} Web Panel         Panel address, certificate, status, and certificate setup"
+        echo -e "  ${C_YELLOW}6)${C_RESET} Optimize          BBR + TCP buffer tuning"
+        echo -e "  ${C_YELLOW}7)${C_RESET} Update            Refresh Rahyaab, keep database and certificates"
+        echo -e "  ${C_YELLOW}8)${C_RESET} Uninstall         Remove Rahyaab from this server"
+        echo -e "  ${C_YELLOW}9)${C_RESET} Exit"
+        local c
+        read -r -p "Select an option: " c
+        case "$c" in
+            1) master_setup_flow; return 0 ;;
+            2) node_join_flow; return 0 ;;
+            3) management_menu ;;
+            4) backup_menu ;;
+            5) web_panel_info ;;
+            6) optimize ;;
+            7) update_code; return 0 ;;
+            8) uninstall; return 0 ;;
+            9) info "Goodbye"; return 0 ;;
+            *) warn "Invalid selection" ;;
+        esac
+    done
 }
 
 main() {
@@ -1120,7 +1268,7 @@ main() {
         return 0
     fi
     if [ -n "$ROLE" ]; then
-        # مسیر غیرتعاملی
+        # Non-interactive path
         if [ "$ROLE" = "master" ]; then
             master_setup_flow
             return 0

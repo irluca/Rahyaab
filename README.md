@@ -1,130 +1,95 @@
 <div align="center">
 
-# 🚀 Rahyaab (رهیاب)
+# Rahyaab
 
-**A server dashboard that finds, deploys, and keeps alive the best tunnel between any two servers — automatically.**
+**A server dashboard that finds, builds, and keeps alive the best tunnel between two servers.**
 
-[![Tests](https://img.shields.io/badge/offline%20tests-219%20passing-brightgreen)](#-testing)
+[![Tests](https://img.shields.io/badge/offline%20tests-219%20passing-brightgreen)](#testing)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](#-quick-start)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](#quick-start)
 [![Release](https://img.shields.io/badge/release-v1.0-orange)](https://github.com/irluca/Rahyaab/releases/tag/v1.0)
-
-[🇮🇷 فارسی](README.fa.md)
 
 </div>
 
----
+Rahyaab is a tunnel dashboard for two servers. The dashboard runs on one server (the hub), the tunnel runs between both, and a resident healer on the Iran-side server restores it the moment it drops — switching protocols if it has to.
 
-Rahyaab is a server-side tunnel dashboard, derived from Tunnel Studio Pro. The dashboard, health checking and monitoring run on a server (the hub), and tunnels can be built between any two servers in the fleet — not only the dashboard host. Once a tunnel is up, a resident healer on the Iran-side server watches it and restores it the moment it drops, switching protocols if it has to. One rule above all others: **it only builds the best tunnel between servers, monitors it, and re-establishes it — it never touches a PasarGuard panel, its configs, nodes or users, by any path.**
+One rule above all: it only builds, monitors, and restores the tunnel. It never touches any PasarGuard panel, its configs, nodes, or users.
 
-## ✨ What it does
+## What it does
 
-- 🔍 **Real benchmarks** — latency, jitter, loss and throughput measured on real traffic for every protocol, with per-protocol history.
-- 🏆 **Evidence-based selection** — protocols are ranked on measured medians, never on simulated rows.
-- 🚀 **One-command install** — `install.sh` sets up the hub or a node, enables BBR, and issues the panel certificate (domain or IP).
-- 🔄 **Click-to-switch** — switch the live tunnel to another protocol from the dashboard, with a confirmation dialog and automatic rollback if the new protocol fails its health check.
-- 🛡️ **Failover with a memory** — the healer retries the same tunnel, then walks candidates until one is healthy; an anti-flap circuit breaker stops rapid repeated switches, and a failed switch never consumes the quota.
-- 👁️ **Live dashboard** — pair cards, server gauges (CPU, memory, disk, uptime), real ping and throughput, event timeline, and a protocol chip line where a blinking green light marks the active protocol. Charts draw only from real collected history — no point, no line, never faked.
-- 🔐 **Key-only access** — the hub reaches servers over SSH with keys only; unknown hosts are rejected; operator passwords are PBKDF2-hashed and sessions are hashed too.
+- **Real benchmarks** — latency, jitter, loss, and throughput measured on real traffic, per protocol.
+- **Evidence-based selection** — protocols are ranked on measured medians, never on made-up numbers.
+- **One-command install** — the installer sets up the hub or a node, enables BBR, and issues the panel certificate.
+- **Click-to-switch** — switch the live tunnel from the dashboard, with confirmation and automatic rollback if the new protocol fails its health check.
+- **Automatic failover** — the healer retries the same tunnel first, then walks candidates until one is healthy. A failed switch never consumes the anti-flap quota.
+- **Live dashboard** — pair cards, server gauges, real ping and throughput, and an event timeline. Charts draw only from real collected history — no data, no line, never faked.
+- **Key-only access** — the hub reaches servers over SSH keys only; unknown hosts are rejected.
 
-## 🌐 Protocols
+## Quick start
 
-| Type | Protocols |
-|---|---|
-| Carriers | `GRE`, `ESP` |
-| Overlays | `backhaul-wss`, `rathole-noise`, `chisel-wss`, `frp-TLS`, `wstunnel-v10`, `xray-reverse`, `kcptun`, `hysteria2` |
-| Quarantined | `sing-box` VLESS-REALITY, SS-2022 — disabled unless explicitly enabled, pending full live validation |
+You need two fresh Debian/Ubuntu servers and root on both.
 
-## 🧭 Safety principles
-
-1. **Only its own units.** The tool creates, restarts and removes exclusively the services and firewall rules tagged as its own — pre-existing tunnels and services are never modified.
-2. **Fail closed.** A failed health check stops the switch before any traffic moves; a failed overlay leaves the live carrier untouched.
-3. **Automatic rollback.** If a new protocol fails verification, the previous one is restored automatically.
-4. **No secrets in the tree.** Keys, passwords and tokens live outside the repository; the hub's own key is git-ignored and verified absent from every commit.
-5. **No panel integration.** Deliberately no access to any user-management panel — the tool hands over a healthy tunnel, and what runs over it is the operator's own business.
-
-## ⚡ Quick start
-
-**Requirements:** Debian/Ubuntu servers, Python 3.11+, root on the target server.
+**1. Master.** Download the installer, run it, and pick Setup Iran:
 
 ```bash
-# 1. Download the installer (fails loudly if the download fails)
 curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh
-
-# 2. Run it — it first asks: master or node?
 bash /tmp/install-rahyaab.sh
 ```
 
-**Join flow — the recommended way (Kariz/Smite-style, no IP typing).**
+It installs the hub, enables BBR, asks for a domain or IP certificate, registers itself, and prints a one-line join command.
 
-1. On the master server, run the installer and pick **master**. It installs the hub, enables BBR, issues the panel certificate, registers itself, and prints a one-line join command.
-2. Paste that one line on the node server. The node installs itself, verifies the master's certificate fingerprint (carried in the command), and joins. The master then builds the pair, deploys the first tunnel (GRE) and installs the healer in the background.
+**2. Node.** Pick Setup Kharej on the node server and paste that one line there. The node installs itself, verifies the master's certificate fingerprint (carried in the command), and joins. The master then builds the pair, deploys the first tunnel (GRE), and installs the healer in the background. This takes a few minutes.
 
-The join code is single-use: printing a new one invalidates the old one. If a pair is already set up, joining never redeploys it on its own.
+**3. Dashboard.** Open `https://YOUR-SERVER-IP:8890` (your master server's IP), create the operator account, and check that the pair is up with GRE and a healthy healer.
 
-Non-interactive:
+Notes: the join code is single-use — printing a new one invalidates the old one, and you can print a fresh one from Manage in the installer menu. The browser warns once about the self-signed IP certificate; compare its fingerprint with the one the installer printed. Re-running the installer is safe: it never overwrites the database or existing certificates.
 
-```bash
-bash /tmp/install-rahyaab.sh --role master --bbr --ip-cert --yes                                  # master + BBR + self-signed IP cert (auto-renewed) + join command
-bash /tmp/install-rahyaab.sh --role hub --bbr --ip-cert --yes                                    # hub + BBR + self-signed IP cert (auto-renewed)
-bash /tmp/install-rahyaab.sh --role hub --bbr --domain panel.example.com --email you@example.com --yes  # hub + Let's Encrypt
-bash /tmp/install-rahyaab.sh --role node --bbr --yes                                              # node (no dashboard)
-bash /tmp/install-rahyaab.sh --print-join                                                          # print a fresh join command (master only)
-bash /tmp/install-rahyaab.sh --join <host> <token> <fingerprint>                                   # join a node with the three parts of the join command
-```
-
-**Full setup — master-driven alternative (two raw servers, one command, no Muse needed).** On the hub server, as root:
+**Alternative: full setup from the master, one command:**
 
 ```bash
 bash /tmp/install-rahyaab.sh --full-setup <node-host> --bbr --ip-cert --yes
 ```
 
-This installs the hub, enables BBR, issues the panel certificate, installs the hub key on the node (the node's root password is asked once and never stored), installs the node remotely, registers the pair, measures and deploys the first tunnel (GRE), and installs the healer on top of it. After it finishes, open the dashboard and create the operator account — that step stays in the dashboard, and the installer never creates accounts or touches PasarGuard.
+This installs the hub, the node (over the hub key — the node's root password is asked once and never stored), the pair, the first tunnel, and the healer. `--protocol` changes the first tunnel (default GRE); `--pair-name` names the pair.
 
-Then open **https://YOUR-SERVER-IP:8890**, create the operator account (setup form, shown only because no account exists yet), and watch the pair come up (GRE + healer) — with the join flow there are no manual pair/benchmark steps. Re-running the installer is safe: the database and existing certificates are never overwritten.
+## Protocols
 
-**Notes:** Let's Encrypt does not issue certificates for bare IPs, so the IP path is self-signed (the browser warns once; the fingerprint is printed by the installer for comparison) with a daily timer that renews it before expiry. A private fork needs `GITHUB_TOKEN` (a read-only fine-grained PAT) for the download path, or `--local` with an uploaded copy of the code.
+| Type | Protocols |
+|---|---|
+| Carriers | `GRE`, `ESP` |
+| Overlays | `backhaul-wss`, `rathole-noise`, `chisel-wss`, `frp-TLS`, `wstunnel-v10`, `xray-reverse`, `kcptun`, `hysteria2` |
+| Quarantined | `sing-box` VLESS-REALITY, SS-2022 — disabled unless explicitly enabled |
 
-## 🧪 Testing
+## Safety
 
-The behaviour contract is an offline suite (no servers needed):
+- The tool creates, restarts, and removes only its own tagged services and firewall rules. Pre-existing tunnels and services are never modified.
+- A failed health check stops a switch before any traffic moves; a failed overlay leaves the live carrier untouched.
+- No keys, passwords, or tokens live in this repository. The hub's own key is git-ignored and verified absent from every commit.
+
+## Testing
 
 ```bash
 python -m pytest orchestrator/ hub/ -q
-# 219 tests — benchmarks, failover, safety gates, installer hygiene, wizard and join flow
+# 219 tests — benchmarks, failover, safety gates, installer hygiene, wizard, join flow
 ```
 
-## 🗂️ Layout
+## Layout
 
 ```
-orchestrator/     proven engine: benchmark, deploy, healer, failover, alerts, offline suite
+orchestrator/     engine: benchmark, deploy, healer, failover, alerts, offline suite
 agent/            resident Rust agent (restart-only, reports only)
 hub/              fleet registry, pairs, JSON API, healer control, jobs, login
-dashboard/        fresh single-page dashboard (RTL, Vazirmatn, dark theme)
-install.sh        server installer (master/node, join flow, BBR, certificates, update, uninstall)
-*.sh              standalone installer pairs (iran-*.sh / foreign-*.sh)
+dashboard/        single-page dashboard (RTL, Vazirmatn, dark theme)
+install.sh        server installer (Setup Iran/Kharej, join flow, BBR, certificates, backup, web panel, optimize, update, uninstall)
 docs/             runbooks (phases, panel survey)
 ```
 
-## 🗺️ Status
+## Status
 
-- **Phase 1 (foundation)** — DONE 2026-10-26: engine + agent ported, suite green.
-- **Phase 2 (hub)** — DONE 2026-10-26: stdlib JSON API, fleet/pair CRUD, healer control, jobs, events.
-- **Phase 3 (dashboard)** — DONE 2026-10-26: fresh dashboard, served by the hub itself.
-- **Phase 4 (live install + tests)** — DONE 2026-10-26: hub on the Iran host, live pair adopted, live API tests passed, overlay switching proven live (carrier↔carrier and carrier↔overlay).
-- **Phase 5 (repo + tag)** — DONE 2026-10-27: public repo, tag `v1.0`.
-- **Installer 1.0.2** — DONE 2026-10-27: live-tested on both servers (node + hub, BBR, IP certificate kept, healer and tunnel untouched).
-- **Installer 1.1.0 and 1.1.1** — DONE 2026-10-27: the hub key is generated on the hub itself and never overwritten once it exists.
-- **Installer 1.2.0** — DONE 2026-10-27: remote node install from the hub server, over the hub key.
-- **Installer 1.3.0** — DONE 2026-10-27: full-setup wizard in one command (hub + node + pair + first tunnel + healer).
-- **Installer 1.4.0** — DONE 2026-10-27: master/node join flow; no IP typing, just one pasted line. Its live test happens on rebuild.
+- **Phases 1–4** — done Oct 26, 2026: engine, hub, dashboard, live install and live overlay-switch proof.
+- **Phase 5** — done Oct 27, 2026: public repo, tag `v1.0`.
+- **Installer 1.4.0** — done Oct 27, 2026: master/node join flow, no IP typing. BackPack-style menu, backup/restore, web panel, and optimize added Oct 28, 2026. Its live test happens on rebuild.
 
-## 📌 Scope
+## Scope
 
 This tool's job begins and ends with the tunnel itself: establish the best one, watch it, restore it. It deliberately has **no integration with any panel or user-management system**.
-
----
-
-<div align="center">
-<sub>Public project — built and maintained with ❤️ for one operator.</sub>
-</div>
