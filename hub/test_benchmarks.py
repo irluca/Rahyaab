@@ -165,3 +165,17 @@ def test_benchmarks_route_serves_factors_behind_login(api):
     assert body["benchmarks"][0]["latency_ms"] == 37.4
     status, _ = client.request("GET", "/api/pairs/9999/benchmarks")
     assert status == 404
+
+
+def test_benchmarks_route_prefers_per_pair_db(api, tmp_path, monkeypatch):
+    client, pair_id = api
+    db = tmp_path / "healer-p.db"
+    conn = _healer_db(db)
+    _row(conn, "ESP", 88.0, 38.0, 1.5, 0.0, 80.0, 78.0,
+         details={"breakdown": {"seconds_survived": 30.0}})
+    conn.close()
+    monkeypatch.setattr(benchmarks, "healer_db_path_for_pair",
+                        lambda pid: str(db))
+    status, body = client.request("GET", f"/api/pairs/{pair_id}/benchmarks")
+    assert status == 200, body
+    assert body["benchmarks"][0]["protocol"] == "ESP"

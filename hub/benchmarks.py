@@ -17,6 +17,11 @@ def healer_db_path() -> str:
     return os.environ.get("RAHYAAB_HEALER_DB", DEFAULT_HEALER_DB)
 
 
+def healer_db_path_for_pair(pair_id: int) -> str:
+    """Per-pair healer DB (multi-node scheme, mirrors healer_paths)."""
+    return "/var/lib/best-tunnel/healer-p%d.db" % int(pair_id)
+
+
 def _col(row: dict, name: str):
     return row.get(name)
 

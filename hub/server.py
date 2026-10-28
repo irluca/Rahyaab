@@ -25,6 +25,7 @@ default — remote access is via SSH forwarding until TLS lands.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -307,12 +308,20 @@ class Hub:
         return result
 
     def pair_benchmarks(self, pair_id: int) -> list[dict]:
-        """Latest benchmark row per protocol, read from the healer DB."""
+        """Latest benchmark row per protocol, read from the healer DB.
+
+        Multi-node pairs keep a per-pair healer DB; legacy pairs keep
+        the single healer.db. Prefer the per-pair file when it exists
+        and fall back to the configured default (which the tests
+        override with RAHYAAB_HEALER_DB) otherwise.
+        """
         from . import benchmarks
         pair = self.store.get_pair(pair_id)
         if pair is None:
             raise ApiError(404, "pair not found")
-        return benchmarks.latest_benchmarks(pair["name"])
+        per_pair = benchmarks.healer_db_path_for_pair(pair_id)
+        db_path = per_pair if os.path.exists(per_pair) else None
+        return benchmarks.latest_benchmarks(pair["name"], db_path)
 
     # -- jobs ------------------------------------------------------------------
     def create_job(self, body: dict) -> dict:
