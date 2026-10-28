@@ -39,7 +39,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -663,10 +663,12 @@ print_join_command() {
     [ -n "$host" ] && [ "$host" != "unknown" ] || die "Master address not found"
     token="$(cd "$INSTALL_DIR" && python3 -m hub.join generate)" || die "Generating the join code failed"
     fp="$(norm_fp "$(cert_fingerprint "$cert")")"
+    JOIN_CMD_LINE="curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh && bash /tmp/install-rahyaab.sh --join $host $token $fp"
     echo
-    echo "Node join command — paste this one line on the node server:"
-    echo "curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh && bash /tmp/install-rahyaab.sh --join $host $token $fp"
-    echo
+    echo -e "${C_CYAN}──────────────────────────────────────────────────────────────${C_RESET}"
+    echo -e "${C_CYAN}Node join command — paste this one line on the node server:${C_RESET}"
+    echo "$JOIN_CMD_LINE"
+    echo -e "${C_CYAN}──────────────────────────────────────────────────────────────${C_RESET}"
     warn "This code is single-use; printing a new one invalidates the old one"
 }
 
@@ -1040,7 +1042,6 @@ summary() {
                 *) host="$(public_ip)" ;;
             esac
             echo
-            info "Panel address: https://$host:$HUB_PORT"
             info "Certificate:   $(cert_fingerprint "$cert")"
             info "The browser warns once about the self-signed cert;"
             info "compare its fingerprint with the one above first."
@@ -1057,6 +1058,8 @@ summary() {
     if hub_installed; then
         if [ -z "$cert" ]; then
             box "Panel: local only (127.0.0.1:8890 on this server)"
+        else
+            box "Panel: https://$host:$HUB_PORT"
         fi
         users=""
         if [ -f "$HUB_DB" ]; then
@@ -1071,9 +1074,14 @@ summary() {
             box "yet, so none is printed here."
         fi
         box ""
-        box "Node: paste the join command printed above"
-        box "on the node server (it downloads this same"
-        box "installer in node mode)."
+        if [ -n "${JOIN_CMD_LINE:-}" ]; then
+            box "Node: paste the join command printed above"
+            box "on the node server (it downloads this same"
+            box "installer in node mode)."
+        else
+            box "Node: print its join command from the Manage"
+            box "menu (it is single-use)."
+        fi
     else
         box "This server is a node; it is managed from"
         box "the master dashboard."
