@@ -29,7 +29,7 @@ One rule above all: it only builds, monitors, and restores the tunnel. It never 
 
 You need two fresh Debian/Ubuntu servers and root on both.
 
-**1. Master.** Download the installer, run it, and pick Setup Iran:
+**1. Master.** Download the installer, run it, and pick Master setup:
 
 ```bash
 curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh
@@ -38,7 +38,7 @@ bash /tmp/install-rahyaab.sh
 
 It installs the hub, enables BBR, asks for a domain or IP certificate, registers itself, and prints a one-line join command.
 
-**2. Node.** Pick Setup Kharej on the node server and paste that one line there. The node installs itself, verifies the master's certificate fingerprint (carried in the command), and joins. The master then builds the pair, deploys the first tunnel (GRE), and installs the healer in the background. This takes a few minutes.
+**2. Node.** Pick Node setup on the node server and paste that one line there. The node installs itself, verifies the master's certificate fingerprint (carried in the command), and joins. The master then builds the pair, deploys the first tunnel (GRE), and installs the healer in the background. This takes a few minutes.
 
 **3. Dashboard.** Open `https://YOUR-SERVER-IP:8890` (your master server's IP), create the operator account, and check that the pair is up with GRE and a healthy healer.
 
@@ -80,7 +80,7 @@ orchestrator/     engine: benchmark, deploy, healer, failover, alerts, offline s
 agent/            resident Rust agent (restart-only, reports only)
 hub/              fleet registry, pairs, JSON API, healer control, jobs, login
 dashboard/        single-page dashboard (RTL, Vazirmatn, dark theme)
-install.sh        server installer (Setup Iran/Kharej, join flow, BBR, certificates, backup, web panel, optimize, update, uninstall)
+install.sh        server installer (Master/Node setup, join flow, BBR, certificates, backup, web panel, optimize, update, uninstall)
 docs/             runbooks (phases, panel survey)
 ```
 

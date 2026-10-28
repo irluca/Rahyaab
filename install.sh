@@ -133,7 +133,7 @@ public_ip() {
 usage() {
     cat <<EOF
 Usage:
-  bash install.sh                     Interactive menu (Setup Iran, Setup Kharej, Manage, Backup, Web Panel, Optimize, Update, Uninstall)
+  bash install.sh                     Interactive menu (Master setup, Node setup, Manage, Backup, Web Panel, Optimize, Update, Uninstall)
   bash install.sh --role master       Non-interactive master install (hub + master registration + join command)
   bash install.sh --role hub          Non-interactive hub install (no master registration)
   bash install.sh --role node         Non-interactive node install (no join)
@@ -1212,8 +1212,8 @@ management_menu() {
 menu() {
     while true; do
         echo
-        echo -e "  ${C_YELLOW}1)${C_RESET} Setup Iran        Install hub + certificate + register master + print join command"
-        echo -e "  ${C_YELLOW}2)${C_RESET} Setup Kharej      Paste join command, install node, join master"
+        echo -e "  ${C_YELLOW}1)${C_RESET} Master setup      Install hub + certificate + register master + print join command"
+        echo -e "  ${C_YELLOW}2)${C_RESET} Node setup        Paste join command, install node, join master"
         echo -e "  ${C_YELLOW}3)${C_RESET} Manage            Install hub/node, status, push key, remote node, full setup, join command"
         echo -e "  ${C_YELLOW}4)${C_RESET} Backup & Restore  Create or restore a backup of hub data and certificates"
         echo -e "  ${C_YELLOW}5)${C_RESET} Web Panel         Panel address, certificate, status, and certificate setup"
