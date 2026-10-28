@@ -29,6 +29,17 @@ Node join (added with the join flow):
   itself, so it needs no executor. A long chain (benchmark + deploy
   + healer install) holds the single worker thread; joins are rare,
   so that trade is accepted like the switch one.
+
+Auto-sweep (added with the staged dashboard):
+- sweep: after a full_setup succeeds, the worker enqueues a sweep job
+  for the pair. The handler only spawns a detached systemd scope unit
+  running orchestrator/run_sweep.py and returns at once — the 20-30
+  minute ladder must never hold the worker thread, or switch and
+  status jobs would queue behind it. The runner merges each
+  protocol's qualified score into the hub pair row as it is measured,
+  so the dashboard fills in gradually; it never touches the live
+  tunnel or current_protocol. A second sweep for the same pair is
+  refused while one's scope unit or pidfile is alive.
 """
 
 from __future__ import annotations
@@ -148,12 +159,85 @@ def _handle_full_setup(store, job, make_executor):
     return result
 
 
+def _sweep_script_path():
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "orchestrator", "run_sweep.py")
+
+
+def _sweep_pidfile(pair_id):
+    import os
+    base = os.environ.get("RAHYAAB_SWEEP_DIR", "/var/lib/rahyaab")
+    return os.path.join(base, "sweep-p%d.pid" % int(pair_id))
+
+
+def _sweep_running(pair_id):
+    """True while a sweep scope unit is active or its pidfile is alive.
+
+    The unit check is primary (the runner survives hub restarts in its
+    own scope); the pidfile covers runners started outside systemd.
+    Any check failure means 'not running' — a stale marker must never
+    block a fresh sweep forever.
+    """
+    import os
+    import subprocess
+    try:
+        rc = subprocess.run(
+            ["systemctl", "is-active",
+             "rahyaab-sweep-p%d.scope" % int(pair_id)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if rc == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        with open(_sweep_pidfile(pair_id)) as f:
+            pid = int(f.read().strip().split()[0])
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _spawn_sweep(argv):
+    import subprocess
+    return subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+
+
+def _handle_sweep(store, job, make_executor):
+    import os
+    import shlex
+    import sys
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("sweep job has no pair")
+    pair_id = pair["id"]
+    if _sweep_running(pair_id):
+        return {"status": "already-running", "pair_id": pair_id}
+    script = _sweep_script_path()
+    if not os.path.exists(script):
+        raise FileNotFoundError("sweep runner not found: %s" % script)
+    log = "/var/log/rahyaab-sweep-p%d.log" % pair_id
+    inner = "%s %s --pair-id %d --hub-db %s > %s 2>&1; echo EXIT_CODE:$? >> %s" % (
+        shlex.quote(sys.executable), shlex.quote(script), pair_id,
+        shlex.quote(str(store.db_path)), shlex.quote(log), shlex.quote(log))
+    argv = ["systemd-run", "--scope", "--unit=rahyaab-sweep-p%d" % pair_id,
+            "bash", "-c", inner]
+    _spawn_sweep(argv)
+    return {"status": "started", "pair_id": pair_id,
+            "unit": "rahyaab-sweep-p%d.scope" % pair_id, "log": log}
+
+
 HANDLERS = {
     "healer_status": _handle_healer_status,
     "connectivity": _handle_connectivity,
     "noop": _handle_noop,
     "switch": _handle_switch,
     "full_setup": _handle_full_setup,
+    "sweep": _handle_sweep,
 }
 
 
@@ -165,22 +249,22 @@ class Worker(threading.Thread):
         self.store = store
         self.make_executor = make_executor  # fn(server) -> Executor | None
         self.poll_seconds = poll_seconds
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 job = self.store.claim_queued_job()
             except Exception:
                 # A transient store error must never kill job processing
                 # silently; back off and try again.
-                self._stop.wait(self.poll_seconds)
+                self._stop_event.wait(self.poll_seconds)
                 continue
             if job is None:
-                self._stop.wait(self.poll_seconds)
+                self._stop_event.wait(self.poll_seconds)
                 continue
             handler = HANDLERS.get(job["type"])
             try:
@@ -190,6 +274,14 @@ class Worker(threading.Thread):
                                  (lambda s: self.make_executor(s))
                                  if self.make_executor else (lambda s: None))
                 self.store.finish_job(job["id"], output, None)
+                if job["type"] == "full_setup" and job.get("pair_id"):
+                    # The first tunnel is up; measure the rest in the
+                    # background so the dashboard fills in gradually.
+                    # A failed enqueue must never break the worker loop.
+                    try:
+                        self.store.create_job("sweep", job["pair_id"], {})
+                    except Exception:
+                        pass
             except Exception as exc:
                 self.store.finish_job(job["id"], None, str(exc))
             time.sleep(0)

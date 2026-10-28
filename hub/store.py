@@ -288,6 +288,30 @@ class Store:
                     (json.dumps(candidate_scores), pair_id),
                 )
 
+    def update_pair_scores(self, pair_id: int, new_scores: dict) -> dict:
+        """Auto-sweep step: merge newly measured scores into the pair row.
+
+        Only qualified scores (score > 0) are merged in; a disqualified
+        protocol never erases a previous score, and current_protocol is
+        never touched — the sweep measures, it does not switch. Returns
+        the merged map.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT candidate_scores FROM pairs WHERE id = ?",
+                (pair_id,),
+            ).fetchone()
+            current = json.loads(row["candidate_scores"]) if row else {}
+            merged = dict(current)
+            for proto, score in (new_scores or {}).items():
+                if score and score > 0:
+                    merged[proto] = score
+            conn.execute(
+                "UPDATE pairs SET candidate_scores = ? WHERE id = ?",
+                (json.dumps(merged), pair_id),
+            )
+            return merged
+
     def list_healer_history(self, pair_id: int, limit: int = 200) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
