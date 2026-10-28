@@ -92,14 +92,13 @@ step()  { echo; echo -e "${C_CYAN}── $* ──${C_RESET}"; }
 
 banner() {
     echo -e "${C_CYAN}"
-    echo '██████╗  █████╗ ██╗  ██╗██╗   ██╗ █████╗  █████╗ ██████╗ '
-    echo '██╔══██╗██╔══██╗██║  ██║╚██╗ ██╔╝██╔══██╗██╔══██╗██╔══██╗'
-    echo '██████╔╝███████║███████║ ╚███╔╝ ███████║███████║██████╔╝'
-    echo '██╔══██╗██╔══██║██╔══██║ ██╔██╗ ██╔══██║██╔══██║██╔══██╗'
-    echo '██║  ██║██║  ██║██║  ██║██╔╝ ██╗██║  ██║██║  ██║██████╔╝'
-    echo '╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ '
+    echo '█████    ██   ██  ██ ██  ██   ██     ██   █████'
+    echo '██  ██  ██ ██ ██  ██ ██  ██  ██ ██  ██ ██ ██  ██'
+    echo '█████  ██████ ██████   ██   ██████ ██████ █████'
+    echo '██ ██  ██  ██ ██  ██   ██   ██  ██ ██  ██ ██  ██'
+    echo '██  ██ ██  ██ ██  ██   ██   ██  ██ ██  ██ █████'
     echo -e "${C_RESET}"
-    echo 'Rahyaab v1.4.0 — tunnel dashboard between your servers'
+    echo "Rahyaab v$VERSION — tunnel dashboard between your servers"
     echo -e "${C_DIM}──────────────────────────────────────────────────────────────${C_RESET}"
 }
 
@@ -1026,13 +1025,61 @@ uninstall() {
 }
 
 summary() {
+    # Final tidy summary. The panel address and certificate fingerprint
+    # are repeated here (not buried in the scrollback), and the
+    # operator account is explained honestly: it does not exist yet,
+    # so no username/password can be printed; the operator creates it
+    # on the panel's first-open setup page.
+    local cert host users
+    if hub_installed; then
+        cert="$(active_hub_cert)"
+        if [ -n "$cert" ]; then
+            case "$cert" in
+                /etc/letsencrypt/live/*/fullchain.pem)
+                    host="$(echo "$cert" | cut -d/ -f5)" ;;
+                *) host="$(public_ip)" ;;
+            esac
+            echo
+            info "Panel address: https://$host:$HUB_PORT"
+            info "Certificate:   $(cert_fingerprint "$cert")"
+            info "The browser warns once about the self-signed cert;"
+            info "compare its fingerprint with the one above first."
+        else
+            echo
+            warn "Panel is local only (no certificate yet)"
+        fi
+    fi
     echo
     echo -e "${C_GREEN}╔══════════════════════════════════════════════════════╗${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  Install complete — next steps:                      ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  1) Open the dashboard, create the operator account  ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  2) Add servers, benchmark, and build the pair       ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  3) Enable the healer from inside the dashboard      ${C_GREEN}║${C_RESET}"
-    echo -e "${C_GREEN}║${C_RESET}  Note: this script never touches PasarGuard.         ${C_GREEN}║${C_RESET}"
+    box() { printf "${C_GREEN}║${C_RESET}  %-52s${C_GREEN}║${C_RESET}\n" "$1"; }
+    box "Install complete."
+    box ""
+    if hub_installed; then
+        if [ -z "$cert" ]; then
+            box "Panel: local only (127.0.0.1:8890 on this server)"
+        fi
+        users=""
+        if [ -f "$HUB_DB" ]; then
+            users="$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT COUNT(*) FROM users").fetchone()[0])' "$HUB_DB" 2>/dev/null || true)"
+        fi
+        if [ -n "$users" ] && [ "$users" != "0" ]; then
+            box "Operator account: already exists."
+        else
+            box "Operator account: not created yet."
+            box "Open the panel address and create it on the"
+            box "first-open setup page. No password exists"
+            box "yet, so none is printed here."
+        fi
+        box ""
+        box "Node: paste the join command printed above"
+        box "on the node server (it downloads this same"
+        box "installer in node mode)."
+    else
+        box "This server is a node; it is managed from"
+        box "the master dashboard."
+    fi
+    box ""
+    box "Note: this script never touches PasarGuard."
     echo -e "${C_GREEN}╚══════════════════════════════════════════════════════╝${C_RESET}"
 }
 
