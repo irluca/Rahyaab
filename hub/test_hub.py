@@ -58,7 +58,7 @@ def hub(tmp_path):
     store = Store(tmp_path / "hub.db")
     fake = FakeExecutor({
         "systemctl is-active": (0, "active\n", ""),
-        "cat /var/lib/best-tunnel/healer-heartbeat.json": (0, _heartbeat_json(), ""),
+        "cat /var/lib/best-tunnel/healer-heartbeat-p1.json": (0, _heartbeat_json(), ""),
         "systemctl restart": (0, "", ""),
         "echo rahyaab-ok": (0, "rahyaab-ok\n", ""),
     })

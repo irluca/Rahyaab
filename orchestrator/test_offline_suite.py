@@ -14234,7 +14234,7 @@ dM/5IlBnpCMejDaKAYLbcLo=
         cfg = install_healer.build_healer_config(row, {"GRE": 99.0})
         self.assertNotIn("telegram", cfg)
         self.assertNotIn("password", json.dumps(cfg).lower())
-        self.assertEqual(cfg["key_path"], "/etc/best-tunnel/healer_key")
+        self.assertEqual(cfg["key_path"], "/etc/best-tunnel/healer-p3_key")
         cfg = install_healer.build_healer_config(
             row, {"GRE": 99.0}, {"bot_token": "tok", "chat_id": "123"})
         self.assertEqual(cfg["telegram"], {"bot_token": "tok", "chat_id": "123"})

@@ -36,7 +36,7 @@ class SwitchFakeExecutor:
             match = re.search(r"'([A-Za-z0-9+/=]+)'", command)
             self.request = json.loads(base64.b64decode(match.group(1)))
             return 0, "", ""
-        if command.startswith("cat /var/lib/best-tunnel/switch-result.json"):
+        if command.startswith("cat /var/lib/best-tunnel/switch-result"):
             if self.request is None or self.result_for is None:
                 return 1, "", "no such file"
             res = self.result_for(self.request)

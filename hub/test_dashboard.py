@@ -20,7 +20,7 @@ def running(tmp_path):
     store = Store(tmp_path / "hub.db")
     fake = FakeExecutor({
         "systemctl is-active": (0, "active\n", ""),
-        "cat /var/lib/best-tunnel/healer-heartbeat.json": (
+        "cat /var/lib/best-tunnel/healer-heartbeat-p1.json": (
             0, json.dumps({"updated_at": "2099-01-01T00:00:00+00:00",
                            "running": True}), ""),
     })

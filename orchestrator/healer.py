@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import alerter
 import failover
 import failover_monitor
+import healer_paths
 import manual_switch
 import storage
 from local_runner import LocalRunner
@@ -287,6 +288,14 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, _handle)
     monitor.start(auto_heal=True)
     heartbeat_path = cfg.get("heartbeat_path") or DEFAULT_HEARTBEAT_PATH
+    # The switch files belong to this pair only: a dashboard switch for
+    # pair N must never be picked up by another pair's healer. Configs
+    # without a pair id (pre-multi-node) keep the legacy paths.
+    _pid = cfg.get("pair_id")
+    request_path = cfg.get("switch_request_path") or (
+        healer_paths.switch_request_path(_pid) if _pid else manual_switch.REQUEST_PATH)
+    result_path = cfg.get("switch_result_path") or (
+        healer_paths.switch_result_path(_pid) if _pid else manual_switch.RESULT_PATH)
     # At most one manual switch runs at a time, in its own thread, so
     # the heartbeat keeps writing while a switch deploys. The switch
     # holds the monitor's action lock, so an auto pass waits it out
@@ -302,11 +311,11 @@ def main(argv=None) -> int:
                 if switch_thread is not None and not switch_thread.is_alive():
                     switch_thread = None
                 if switch_thread is None:
-                    request = manual_switch.consume(manual_switch.REQUEST_PATH)
+                    request = manual_switch.consume(request_path)
                     if request is not None:
                         if manual_switch.is_stale(request):
                             manual_switch.write_result(
-                                manual_switch.RESULT_PATH,
+                                result_path,
                                 {"request_id": request["request_id"],
                                  "status": "refused", "from": "", "to": request["protocol"],
                                  "already": False, "rolled_back": False,
@@ -314,7 +323,7 @@ def main(argv=None) -> int:
                         else:
                             switch_thread = threading.Thread(
                                 target=manual_switch.run_manual_switch,
-                                args=(monitor, request, manual_switch.RESULT_PATH),
+                                args=(monitor, request, result_path),
                                 daemon=True, name="manual-switch")
                             switch_thread.start()
             except Exception as exc:

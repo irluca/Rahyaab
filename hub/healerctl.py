@@ -1,11 +1,14 @@
 """Control and observation of the server-side healer from the hub.
 
-The healer lives on one fleet server per pair (normally the Iran
-side) as the `best-tunnel-healer` systemd unit, with its heartbeat
-at /var/lib/best-tunnel/healer-heartbeat.json. The hub reads only
-the unit state and the heartbeat — it never cats /etc/best-tunnel/
-healer.json, which may one day hold a Telegram token, and it never
-returns raw config to a client.
+Each pair has its own healer instance on its healer server (normally
+the Iran side): unit `best-tunnel-healer-p{pair_id}`, heartbeat at
+/var/lib/best-tunnel/healer-heartbeat-p{pair_id}.json, switch files
+switch-request-p{pair_id}.json / switch-result-p{pair_id}.json. The
+scheme mirrors orchestrator/healer_paths.py; keep the two in sync.
+
+The hub reads only the unit state and the heartbeat — it never cats
+/etc/best-tunnel/healer-p*.json, which may one day hold a Telegram
+token, and it never returns raw config to a client.
 
 A heartbeat older than 120 seconds (six 20-second passes) counts as
 stale: the unit may claim to be active while the monitor itself has
@@ -19,13 +22,26 @@ import datetime
 import json
 import time
 
-UNIT = "best-tunnel-healer"
-HEARTBEAT_PATH = "/var/lib/best-tunnel/healer-heartbeat.json"
-STALE_AFTER_SECONDS = 120
+
+def unit_name(pair_id: int) -> str:
+    return "best-tunnel-healer-p%d" % int(pair_id)
+
+
+def heartbeat_path(pair_id: int) -> str:
+    return "/var/lib/best-tunnel/healer-heartbeat-p%d.json" % int(pair_id)
+
+
 # Manual-switch protocol (see orchestrator/manual_switch.py): the hub
 # only writes the request; the healer is the only controller that acts.
-SWITCH_REQUEST_PATH = "/var/lib/best-tunnel/switch-request.json"
-SWITCH_RESULT_PATH = "/var/lib/best-tunnel/switch-result.json"
+def switch_request_path(pair_id: int) -> str:
+    return "/var/lib/best-tunnel/switch-request-p%d.json" % int(pair_id)
+
+
+def switch_result_path(pair_id: int) -> str:
+    return "/var/lib/best-tunnel/switch-result-p%d.json" % int(pair_id)
+
+
+STALE_AFTER_SECONDS = 120
 
 
 def _parse_heartbeat(raw: str) -> dict | None:
@@ -36,10 +52,10 @@ def _parse_heartbeat(raw: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def status(executor) -> dict:
-    rc, active_out, _ = executor.run(f"systemctl is-active {UNIT}", timeout=20)
+def status(executor, pair_id: int) -> dict:
+    rc, active_out, _ = executor.run(f"systemctl is-active {unit_name(pair_id)}", timeout=20)
     unit_active = rc == 0 and active_out.strip() == "active"
-    rc, raw, _ = executor.run(f"cat {HEARTBEAT_PATH}", timeout=20)
+    rc, raw, _ = executor.run(f"cat {heartbeat_path(pair_id)}", timeout=20)
     heartbeat = _parse_heartbeat(raw) if rc == 0 else None
     age = None
     if heartbeat and heartbeat.get("updated_at"):
@@ -60,22 +76,22 @@ def status(executor) -> dict:
     }
 
 
-def start(executor) -> dict:
-    rc, out, err = executor.run(f"systemctl start {UNIT}", timeout=60)
+def start(executor, pair_id: int) -> dict:
+    rc, out, err = executor.run(f"systemctl start {unit_name(pair_id)}", timeout=60)
     return {"ok": rc == 0, "output": out.strip(), "error": err.strip()}
 
 
-def stop(executor) -> dict:
-    rc, out, err = executor.run(f"systemctl stop {UNIT}", timeout=60)
+def stop(executor, pair_id: int) -> dict:
+    rc, out, err = executor.run(f"systemctl stop {unit_name(pair_id)}", timeout=60)
     return {"ok": rc == 0, "output": out.strip(), "error": err.strip()}
 
 
-def restart(executor) -> dict:
-    rc, out, err = executor.run(f"systemctl restart {UNIT}", timeout=60)
+def restart(executor, pair_id: int) -> dict:
+    rc, out, err = executor.run(f"systemctl restart {unit_name(pair_id)}", timeout=60)
     return {"ok": rc == 0, "output": out.strip(), "error": err.strip()}
 
 
-def request_switch(executor, protocol: str, request_id: str) -> dict:
+def request_switch(executor, pair_id: int, protocol: str, request_id: str) -> dict:
     """Ask the healer to switch to `protocol`, by request file.
 
     The payload is base64-wrapped so no quoting can mangle it, and the
@@ -85,19 +101,20 @@ def request_switch(executor, protocol: str, request_id: str) -> dict:
     payload = json.dumps({"protocol": protocol, "request_id": request_id,
                           "requested_at": time.time()})
     blob = base64.b64encode(payload.encode()).decode()
+    path = switch_request_path(pair_id)
     rc, out, err = executor.run(
-        f"printf '%s' '{blob}' | base64 -d > {SWITCH_REQUEST_PATH} "
-        f"&& chmod 600 {SWITCH_REQUEST_PATH}", timeout=30)
+        f"printf '%s' '{blob}' | base64 -d > {path} "
+        f"&& chmod 600 {path}", timeout=30)
     return {"ok": rc == 0, "output": out.strip(), "error": err.strip()}
 
 
-def switch_result(executor, request_id: str) -> dict | None:
+def switch_result(executor, pair_id: int, request_id: str) -> dict | None:
     """The healer's result for `request_id`, or None if not answered yet.
 
     Results for other request ids are ignored: a stale result file
     from an earlier switch must never satisfy a later poll.
     """
-    rc, raw, _ = executor.run(f"cat {SWITCH_RESULT_PATH}", timeout=20)
+    rc, raw, _ = executor.run(f"cat {switch_result_path(pair_id)}", timeout=20)
     if rc != 0:
         return None
     try:

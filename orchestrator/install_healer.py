@@ -46,9 +46,13 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import failover
+import healer_paths
 import storage
 
 CODE_DIR = "/opt/best-tunnel/orchestrator"
+# Legacy single-instance paths, kept only as render_unit's default and as
+# the fallback for configs that predate per-pair paths. New installs use
+# healer_paths.* for every pair; see healer_paths.py.
 CONFIG_PATH = "/etc/best-tunnel/healer.json"
 KEY_PATH = "/etc/best-tunnel/healer_key"
 DB_PATH = "/var/lib/best-tunnel/healer.db"
@@ -119,7 +123,8 @@ def build_healer_config(row: dict, medians: dict[str, float],
         "iran": {"host": row["iran_host"], "port": row.get("iran_port", 22), "user": "root"},
         "foreign": {"host": row["foreign_host"], "port": row.get("foreign_port", 22),
                     "user": "root"},
-        "key_path": KEY_PATH,
+        "key_path": healer_paths.key_path(row["id"]),
+        "config_path": healer_paths.config_path(row["id"]),
         "frontend_port": row.get("frontend_port", 443),
         "backend_port": row.get("backend_port") or None,
         "underlay_carrier": row.get("underlay_carrier", ""),
@@ -130,8 +135,10 @@ def build_healer_config(row: dict, medians: dict[str, float],
         "candidate_scores": dict(medians),
         "check_interval_seconds": 20,
         "down_streak": 3,
-        "db_path": DB_PATH,
-        "heartbeat_path": HEARTBEAT_PATH,
+        "db_path": healer_paths.db_path(row["id"]),
+        "heartbeat_path": healer_paths.heartbeat_path(row["id"]),
+        "switch_request_path": healer_paths.switch_request_path(row["id"]),
+        "switch_result_path": healer_paths.switch_result_path(row["id"]),
     }
     if telegram and telegram.get("bot_token") and telegram.get("chat_id"):
         cfg["telegram"] = {"bot_token": telegram["bot_token"],
@@ -194,6 +201,16 @@ def install(iran: Host, foreign: Host, cfg: dict, code_files: dict[str, str],
     service's check interval is 20 s); tests pass 0.
     """
     steps = []
+    # Paths come from the config when present (build_healer_config sets
+    # per-pair paths); a config without them falls back to the per-pair
+    # scheme, never to the legacy single-instance paths.
+    pair_id = cfg["pair_id"]
+    key_path = cfg.get("key_path") or healer_paths.key_path(pair_id)
+    config_path = cfg.get("config_path") or healer_paths.config_path(pair_id)
+    db_path = cfg.get("db_path") or healer_paths.db_path(pair_id)
+    heartbeat_path = cfg.get("heartbeat_path") or healer_paths.heartbeat_path(pair_id)
+    unit = healer_paths.unit_name(pair_id)
+    unit_file = healer_paths.unit_path(pair_id)
     # 1. Dependencies on the Iran host.
     iran.exec("apt-get update && apt-get install -y python3-paramiko python3-cryptography",
               timeout=600)
@@ -204,13 +221,13 @@ def install(iran: Host, foreign: Host, cfg: dict, code_files: dict[str, str],
         iran.write_file(f"{CODE_DIR}/{name}", content, mode=0o644)
     steps.append(f"{len(code_files)} orchestrator modules uploaded")
     # 3. Dedicated keypair on Iran (only if missing), authorised on foreign.
-    rc, _, _ = iran.exec(f"test -e {KEY_PATH}", check=False)
+    rc, _, _ = iran.exec(f"test -e {key_path}", check=False)
     if rc != 0:
-        iran.exec(f"ssh-keygen -t ed25519 -f {KEY_PATH} -N '' -C 'best-tunnel-healer'")
+        iran.exec(f"ssh-keygen -t ed25519 -f {key_path} -N '' -C 'best-tunnel-healer'")
         steps.append("healer keypair created on Iran host")
     else:
         steps.append("healer keypair already present on Iran host")
-    pubkey = iran.read_file(KEY_PATH + ".pub").strip()
+    pubkey = iran.read_file(key_path + ".pub").strip()
     if not pubkey:
         raise RuntimeError("healer public key is unreadable on the Iran host")
     foreign.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh")
@@ -227,9 +244,9 @@ def install(iran: Host, foreign: Host, cfg: dict, code_files: dict[str, str],
         steps.append("healer public key already authorised on foreign host")
     foreign.exec(f"chmod 600 {auth_path}")
     # 4. Config + unit + fresh database.
-    iran.write_file(CONFIG_PATH, json.dumps(cfg, indent=2, sort_keys=True), mode=0o600)
-    iran.write_file(UNIT_PATH, render_unit(), mode=0o644)
-    iran.exec(f"rm -f {DB_PATH} {DB_PATH}-wal {DB_PATH}-shm")
+    iran.write_file(config_path, json.dumps(cfg, indent=2, sort_keys=True), mode=0o600)
+    iran.write_file(unit_file, render_unit(config_path=config_path), mode=0o644)
+    iran.exec(f"rm -f {db_path} {db_path}-wal {db_path}-shm")
     steps.append("healer config and unit written, database reset for fresh seeding")
     # 5. Retire the old agents on both hosts (best-effort: absent is fine).
     for host in (iran, foreign):
@@ -240,18 +257,18 @@ def install(iran: Host, foreign: Host, cfg: dict, code_files: dict[str, str],
     # validator is the only actor that can heal.
     iran.exec("systemctl daemon-reload")
     _, once_out, _ = iran.exec(
-        f"/usr/bin/python3 {CODE_DIR}/healer.py --config {CONFIG_PATH} --once", timeout=300)
+        f"/usr/bin/python3 {CODE_DIR}/healer.py --config {config_path} --once", timeout=300)
     steps.append("healer --once validation pass completed")
     # 7. Start the service and verify it is alive with a fresh heartbeat.
-    iran.exec(f"systemctl enable --now best-tunnel-healer")
+    iran.exec(f"systemctl enable --now {unit}")
     if settle_seconds:
         time.sleep(settle_seconds)
-    _, active, _ = iran.exec("systemctl is-active best-tunnel-healer")
+    _, active, _ = iran.exec(f"systemctl is-active {unit}")
     if active.strip() != "active":
-        raise RuntimeError("best-tunnel-healer is not active after start")
-    heartbeat_raw = iran.read_file(HEARTBEAT_PATH)
+        raise RuntimeError(f"{unit} is not active after start")
+    heartbeat_raw = iran.read_file(heartbeat_path)
     heartbeat = json.loads(heartbeat_raw) if heartbeat_raw.strip() else {}
-    steps.append("best-tunnel-healer service active")
+    steps.append(f"{unit} service active")
     return {"steps": steps, "once_output": once_out, "heartbeat": heartbeat,
             "active": active.strip()}
 

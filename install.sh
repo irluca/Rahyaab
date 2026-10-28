@@ -331,6 +331,18 @@ ensure_hub_key() {
     info "Hub public key (copy it manually to a node if you do not want to give a password):"
     cat "$HUB_PUB"
     info "Fingerprint: $(ssh-keygen -lf "$HUB_PUB" | awk '{print $2}')"
+    # The hub SSHes to BOTH pair servers with this key — including to
+    # itself, because the master is the Iran side of its own pairs.
+    # Without this self-authorisation the background full_setup job
+    # dies on authentication the moment it connects to the master.
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+    if grep -qF "$(cat "$HUB_PUB")" /root/.ssh/authorized_keys; then
+        info "Hub key already authorised on this server"
+    else
+        cat "$HUB_PUB" >> /root/.ssh/authorized_keys
+        ok "Hub key authorised on this server (the hub can SSH to itself)"
+    fi
 }
 
 # Install the hub public key on a node with that node's one-time
@@ -687,8 +699,14 @@ node_join() { # $1=host $2=token $3=fingerprint
     done
     [ -n "$key_file" ] || die "No SSH host key on this server (is sshd installed?); install openssh-server first"
     read -r ktype kb64 _ < "$key_file"
+    # The node name travels with the join so the master can tell nodes
+    # apart: same hostname on a different host becomes name-2, name-3
+    # on the master instead of hijacking the first node's record.
+    local node_name
+    node_name="$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9_.-')"
+    [ -n "$node_name" ] || node_name="node"
     local json resp code body err hub_pub
-    json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" python3 -c 'import json,os; print(json.dumps({"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"]}))')"
+    json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" NNAME="$node_name" python3 -c 'import json,os; print(json.dumps({"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"], "name": os.environ["NNAME"]}))')"
     resp="$(curl -sS --max-time 30 --cacert /tmp/rahyaab-master-cert.pem -X POST "https://$host:$HUB_PORT/api/join" -H 'Content-Type: application/json' --data "$json" -w $'\n%{http_code}')" \
         || die "Connection to the master failed ($host:$HUB_PORT)"
     code="${resp##*$'\n'}"

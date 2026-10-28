@@ -54,7 +54,7 @@ def _healer_executor(store, job, make_executor):
 def _handle_healer_status(store, job, make_executor):
     pair, executor = _healer_executor(store, job, make_executor)
     try:
-        result = healerctl.status(executor)
+        result = healerctl.status(executor, pair["id"])
     except Exception as exc:  # SSH failure is a result, not a crash
         result = {"reachable": False, "error": str(exc)}
     store.update_pair_healer(pair["id"], result)
@@ -97,12 +97,12 @@ def _handle_switch(store, job, make_executor):
             "protocol %s is not a qualified candidate for this pair" % protocol)
     _, executor = _healer_executor(store, job, make_executor)
     request_id = uuid.uuid4().hex
-    req = healerctl.request_switch(executor, protocol, request_id)
+    req = healerctl.request_switch(executor, pair["id"], protocol, request_id)
     if not req.get("ok"):
         raise RuntimeError("could not write switch request: %s" % req.get("error"))
     deadline = time.time() + 600
     while time.time() < deadline:
-        res = healerctl.switch_result(executor, request_id)
+        res = healerctl.switch_result(executor, pair["id"], request_id)
         if res is not None:
             status = res.get("status")
             output = {"status": status, "from": res.get("from"),

@@ -15,6 +15,7 @@ import pytest  # noqa: E402
 
 import install_healer  # noqa: E402
 import install_healer_wizard  # noqa: E402
+import healer_paths  # noqa: E402
 
 FAKE_PUB = "ssh-ed25519 AAAAWIZARDTEST best-tunnel-healer"
 HEARTBEAT = json.dumps({"active_tunnel": "GRE", "verdicts": {"1": "HEALTHY"}})
@@ -32,8 +33,11 @@ class FakeHost:
             path = cmd[len("test -e "):].strip()
             return (0 if path in self.fs else 1), "", ""
         if "ssh-keygen" in cmd:
-            self.fs[install_healer.KEY_PATH] = "private"
-            self.fs[install_healer.KEY_PATH + ".pub"] = FAKE_PUB
+            import re
+            m = re.search(r"-f (\S+)", cmd)
+            path = m.group(1) if m else install_healer.KEY_PATH
+            self.fs[path] = "private"
+            self.fs[path + ".pub"] = FAKE_PUB
             return 0, "", ""
         if cmd.strip() == "echo $HOME":
             return 0, "/root\n", ""
@@ -78,13 +82,17 @@ def test_wizard_install_fresh_key(fakes):
     assert result["active"] == "active"
     iran = fakes["203.0.113.10"]
     foreign = fakes["203.0.113.20"]
-    cfg = json.loads(iran.fs[install_healer.CONFIG_PATH])
+    cfg = json.loads(iran.fs[healer_paths.config_path(1)])
     assert cfg["pair_id"] == 1
     assert cfg["active_tunnel"] == "GRE"
     assert cfg["candidate_scores"] == {"GRE": 99.9}
-    assert cfg["key_path"] == install_healer.KEY_PATH
+    assert cfg["key_path"] == healer_paths.key_path(1)
+    assert cfg["db_path"] == healer_paths.db_path(1)
+    assert cfg["heartbeat_path"] == healer_paths.heartbeat_path(1)
+    assert cfg["switch_request_path"] == healer_paths.switch_request_path(1)
+    assert cfg["switch_result_path"] == healer_paths.switch_result_path(1)
     assert "telegram" not in cfg
-    assert install_healer.UNIT_PATH in iran.fs
+    assert healer_paths.unit_path(1) in iran.fs
     assert FAKE_PUB in foreign.fs["/root/.ssh/authorized_keys"]
 
 
@@ -96,8 +104,8 @@ def test_wizard_install_existing_key_skips_keygen(fakes):
     def seeding_factory(host, port, user, key_path, known_hosts="/root/.ssh/known_hosts"):
         fake = orig(host, port, user, key_path, known_hosts)
         if host == "203.0.113.10":
-            fake.fs[install_healer.KEY_PATH] = "private"
-            fake.fs[install_healer.KEY_PATH + ".pub"] = FAKE_PUB
+            fake.fs[healer_paths.key_path(1)] = "private"
+            fake.fs[healer_paths.key_path(1) + ".pub"] = FAKE_PUB
         if host == "203.0.113.20":
             fake.fs["/root/.ssh/authorized_keys"] = FAKE_PUB + "\n"
         return fake

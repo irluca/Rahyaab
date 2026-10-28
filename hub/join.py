@@ -2,17 +2,24 @@
 
 Master install generates a single-use join token and prints the join
 command. The node pastes that command; its installer phones home to
-POST /api/join with the token + its own SSH host key. The hub:
+POST /api/join with the token + its own SSH host key + its hostname.
+The hub:
 
 - validates the token (one successful use, then it is deleted),
 - creates the node server record with the request's source IP
-  (auto-detected, never typed by the operator),
+  (auto-detected, never typed by the operator); a node name that
+  already belongs to a different host is suffixed (name-2, name-3)
+  instead of hijacking that node's record,
 - pins the node's host key into the hub's known_hosts (stale lines
   for that host removed first, so a rebuilt node re-joins cleanly),
 - returns the hub public key for the node to authorise,
-- creates the first pair (master = iran, node = foreign) if none
-  exists, and enqueues a full_setup job that measures, deploys the
-  first tunnel and installs the healer.
+- creates a pair for THIS node (master = iran, node = foreign) if
+  the master has no pair with this node yet, and enqueues a
+  full_setup job that measures, deploys the first tunnel and installs
+  that pair's own healer instance. The very first pair keeps the
+  historic name; later pairs are named after their node, and each
+  gets the next free frontend port on the master (443, then 444, ...),
+  because two pairs on one master cannot share one frontend port.
 
 No login is needed for /api/join: the token is the credential. A
 pair that already has a current protocol gets no new job — joining
@@ -21,6 +28,7 @@ never redeploys a live pair on its own.
 
 import hmac
 import os
+import re
 import secrets
 
 DEFAULT_TOKEN_PATH = "/etc/rahyaab/join.token"
@@ -114,6 +122,43 @@ def pin_host_key(known_hosts: str, host: str, port: int,
     os.chmod(known_hosts, 0o600)
 
 
+def sanitize_node_name(raw) -> str:
+    """A node name safe to show and to derive a pair name from."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.\-]", "", (raw or "").strip())[:64]
+    return cleaned or DEFAULT_NODE_NAME
+
+
+def _free_name(store, wanted: str) -> str:
+    """`wanted`, or the first suffixed variant no server uses."""
+    taken = {s["name"] for s in store.list_servers()}
+    if wanted not in taken:
+        return wanted
+    i = 2
+    while "%s-%d" % (wanted, i) in taken:
+        i += 1
+    return "%s-%d" % (wanted, i)
+
+
+def _free_pair_name(store, wanted: str) -> str:
+    taken = {p["name"] for p in store.list_pairs()}
+    if wanted not in taken:
+        return wanted
+    i = 2
+    while "%s-%d" % (wanted, i) in taken:
+        i += 1
+    return "%s-%d" % (wanted, i)
+
+
+def _free_frontend_port(store, master_id: int) -> int:
+    """First free frontend port on this master, starting at 443."""
+    used = {int(p.get("frontend_port") or 0)
+            for p in store.list_pairs() if p["iran_server_id"] == master_id}
+    port = 443
+    while port in used:
+        port += 1
+    return port
+
+
 def join_node(store, body: dict, source_ip: str,
               token_file: str | None = None,
               pubkey_file: str | None = None,
@@ -129,7 +174,7 @@ def join_node(store, body: dict, source_ip: str,
     saved = read_token(token_file)
     if not presented or saved is None or not hmac.compare_digest(presented, saved):
         raise JoinError(403, "invalid join token")
-    name = (body.get("name") or DEFAULT_NODE_NAME).strip() or DEFAULT_NODE_NAME
+    name = sanitize_node_name(body.get("name"))
     try:
         ssh_port = int(body.get("ssh_port") or 22)
     except (TypeError, ValueError):
@@ -153,15 +198,17 @@ def join_node(store, body: dict, source_ip: str,
     for server in store.list_servers():
         if server["name"] == DEFAULT_MASTER_NAME:
             master = server
-        if server["name"] == name:
+        if (server["name"] == name and server["host"] == source_ip
+                and (server.get("port") or 22) == ssh_port):
             node = server
     if master is None:
         raise JoinError(400, "master server record missing; register the master first")
-    if node is not None:
-        if node["host"] != source_ip or (node.get("port") or 22) != ssh_port:
-            store.update_server_host(node["id"], source_ip, ssh_port)
-            node = store.get_server(node["id"])
-    else:
+    if node is None:
+        # Same name but a different host is a second node, not a re-join:
+        # suffix it instead of repointing the first node's record (and
+        # its live pair) at a different machine. A rebuilt node keeps
+        # its address in practice, so the exact match above covers it.
+        name = _free_name(store, name)
         node = store.create_server({
             "name": name, "host": source_ip, "port": ssh_port,
             "username": "root", "key_path": None, "notes": "join",
@@ -170,18 +217,23 @@ def join_node(store, body: dict, source_ip: str,
 
     pair = None
     for existing in store.list_pairs():
-        if existing["name"] == DEFAULT_PAIR_NAME:
+        if (existing["iran_server_id"] == master["id"]
+                and existing["foreign_server_id"] == node["id"]):
             pair = existing
             break
     if pair is None:
         from hub.wizard import next_inner_pair
         inner_iran, inner_foreign = next_inner_pair(store)
+        if not store.list_pairs():
+            pair_name = DEFAULT_PAIR_NAME
+        else:
+            pair_name = _free_pair_name(store, "جفت %s" % name)
         pair = store.create_pair({
-            "name": DEFAULT_PAIR_NAME,
+            "name": pair_name,
             "iran_server_id": master["id"],
             "foreign_server_id": node["id"],
             "healer_server_id": master["id"],
-            "frontend_port": 443,
+            "frontend_port": _free_frontend_port(store, master["id"]),
             "current_protocol": None,
             "inner_iran": inner_iran,
             "inner_foreign": inner_foreign,

@@ -284,7 +284,7 @@ class Hub:
             raise ApiError(404, "pair not found")
         _, executor = self._healer_executor(pair)
         try:
-            result = healerctl.status(executor)
+            result = healerctl.status(executor, pair["id"])
         except Exception as exc:
             result = {"reachable": False, "error": str(exc)}
         self.store.update_pair_healer(pair_id, result)
@@ -298,7 +298,7 @@ class Hub:
         fn = {"start": healerctl.start, "stop": healerctl.stop,
               "restart": healerctl.restart}[action]
         try:
-            result = fn(executor)
+            result = fn(executor, pair_id)
         except Exception as exc:
             raise ApiError(502, "healer host unreachable: %s" % exc)
         self.store.log_event("healer_%s" % action,
