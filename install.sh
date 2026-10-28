@@ -39,7 +39,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.5.1"
+VERSION="1.5.2"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -607,11 +607,34 @@ firewall_open_8890() {
     fi
 }
 
+pin_self_host_key() { # Pin this host's own key into root known_hosts
+    # The healer-install and hub paths refuse unknown hosts
+    # (RejectPolicy), while the node join only pins the node's key.
+    # Without this, every hub job that touches the master itself
+    # fails with "Server '<master>' not found in known_hosts" —
+    # the full_setup job dies at the healer step, after the tunnel
+    # itself was already deployed, so the pair stays down with no
+    # scores and no healer. Non-fatal here: a failure warns loudly
+    # instead of bricking the install, and the job error names it.
+    local host
+    host="$(public_ip)"
+    [ -n "$host" ] || { warn "Could not determine this server's public IP; hub jobs to itself may fail"; return 0; }
+    mkdir -p /root/.ssh && touch /root/.ssh/known_hosts
+    if grep -q "^$host " /root/.ssh/known_hosts 2>/dev/null; then
+        ok "This server's own host key is already pinned"
+    elif command -v ssh-keyscan >/dev/null 2>&1 && ssh-keyscan -t ed25519 "$host" >> /root/.ssh/known_hosts 2>/dev/null; then
+        ok "This server's own host key pinned (hub jobs to itself will be accepted)"
+    else
+        warn "Could not pin this server's own host key; hub jobs to itself will fail with 'not found in known_hosts'"
+    fi
+}
+
 install_hub() {
     step "Installing the hub (dashboard)"
     install_deps hub
     fetch_code
     ensure_hub_key
+    pin_self_host_key
     write_hub_unit "127.0.0.1" "" ""
     systemctl enable "$UNIT" >/dev/null 2>&1
     # Note: enable --now does not restart a running unit; a reinstall
