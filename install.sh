@@ -39,7 +39,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.5.3"
+VERSION="1.5.4"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -729,14 +729,28 @@ node_join() { # $1=host $2=token $3=fingerprint
     local node_name
     node_name="$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9_.-')"
     [ -n "$node_name" ] || node_name="node"
-    # No port prompt here by design: the master assigns a random
-    # five-digit frontend port at join time (free on the master,
-    # shown on the dashboard and printed below after the join).
-    # The operator changes it from the dashboard afterwards when a
-    # specific port is wanted; the join API still accepts an
-    # explicit frontend_port for scripted use.
+    # The tunnel frontend port binds on the master (Iran): it is the
+    # port user traffic dials, one per pair. The pair is born at
+    # join time, so this prompt is the install moment that sets it.
+    # Empty means the master picks a random five-digit port that is
+    # free on the master; a typed port is refused by the master
+    # when it is reserved, taken by another pair, or already bound.
+    # Panel inbounds usually have fixed ports (for example a VLESS
+    # Reality inbound on 28701): typing that port here makes the
+    # tunnel listen on it, so client configs keep working with
+    # only the server IP swapped to the master.
+    # Non-interactive runs (piped stdin) skip the prompt and get
+    # the random port.
+    local tunnel_port=""
+    if [ -t 0 ]; then
+        read -r -p "Tunnel port on the master (empty = random): " tunnel_port
+        if [ -n "$tunnel_port" ]; then
+            [[ "$tunnel_port" =~ ^[0-9]+$ ]] && [ "$tunnel_port" -ge 1 ] && [ "$tunnel_port" -le 65535 ] \
+                || die "Tunnel port must be a number between 1 and 65535"
+        fi
+    fi
     local json resp code body err hub_pub
-    json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" NNAME="$node_name" python3 -c 'import json,os; print(json.dumps({"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"], "name": os.environ["NNAME"]}))')"
+    json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" NNAME="$node_name" FPORT="$tunnel_port" python3 -c 'import json,os; d={"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"], "name": os.environ["NNAME"]}; [d.update(frontend_port=int(os.environ["FPORT"])) if os.environ["FPORT"] else None]; print(json.dumps(d))')"
     resp="$(curl -sS --max-time 30 --cacert /tmp/rahyaab-master-cert.pem -X POST "https://$host:$HUB_PORT/api/join" -H 'Content-Type: application/json' --data "$json" -w $'\n%{http_code}')" \
         || die "Connection to the master failed ($host:$HUB_PORT)"
     code="${resp##*$'\n'}"
