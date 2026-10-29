@@ -150,6 +150,7 @@ function renderPairs() {
       <div class="actions">
         <button class="act-btn green" data-act="refresh">↻ تازه‌سازی وضعیت</button>
         <button class="act-btn blue" data-act="restart">⟳ ری‌استارت نگهبان</button>
+        <button class="act-btn" data-act="port">🔌 تغییر پورت تانل</button>
       </div>
     </article>`;
   }).join("");
@@ -165,6 +166,21 @@ function renderPairs() {
       if (!confirm("نگهبان این جفت ری‌استارت شود؟")) return;
       await api("POST", `/api/pairs/${id}/healer/restart`);
       showBanner("دستور ری‌استارت نگهبان فرستاده شد.");
+    };
+    card.querySelector('[data-act="port"]').onclick = async () => {
+      const pair = state.pairs.find(x => x.id === +id);
+      const cur = pair ? pair.frontend_port : "";
+      const raw = prompt(`پورت تازه تانل را وارد کنید (فعلی: ${cur || "—"}) — خالی یعنی لغو:`, "");
+      if (raw === null || raw.trim() === "") return;
+      const port = +raw.trim();
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        showBanner("پورت نامعتبر است؛ عددی بین ۱ تا ۶۵۵۳۵ وارد کنید.");
+        return;
+      }
+      if (!confirm(`پورت تانل این جفت از ${cur} به ${port} تغییر کند؟ اگر پروتکل فعلی اورلی باشد تانل برای لحظاتی بازاستقرار می‌شود و در صورت خرابی به پورت قبلی برمی‌گردد؛ اگر کریر باشد تانل دست نمی‌خورد.`)) return;
+      await api("POST", `/api/pairs/${id}/change_port`, { frontend_port: port });
+      showBanner("جاب تغییر پورت ساخته شد؛ چند ثانیه دیگر تازه‌سازی کنید.");
+      setTimeout(loadAll, 3000);
     };
     card.querySelectorAll("button.switch-btn").forEach(btn => {
       btn.onclick = () => {

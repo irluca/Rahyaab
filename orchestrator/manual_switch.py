@@ -21,6 +21,12 @@ restored without a redeploy.
 
 Request file (written by the hub, consumed by the healer):
     {"protocol": "ESP", "request_id": "<uuid>", "requested_at": <epoch>}
+    An optional "frontend_port" turns the request into a port
+    change: same protocol, new frontend port. The healer redeploys
+    that protocol on the new port with the switch's smoke check and
+    rollback, and on success records the new port in the healer
+    pair row (the monitor reads the row every pass, so the row —
+    not the config — is what makes the change stick).
 Result file (written by the healer, polled by the hub job):
     {"request_id", "status": "done" | "failed" | "refused",
      "from": <protocol>, "to": <protocol>, "already": bool,
@@ -44,6 +50,7 @@ import time
 # Flat import: the healer runs from orchestrator/ (see healer.py), and
 # the tests insert this directory on sys.path the same way.
 import protocols
+import storage
 
 REQUEST_PATH = "/var/lib/best-tunnel/switch-request.json"
 RESULT_PATH = "/var/lib/best-tunnel/switch-result.json"
@@ -67,8 +74,16 @@ def load_request(path: str):
         return None
     if not protocol or not request_id or requested_at <= 0:
         return None
+    frontend_port = data.get("frontend_port")
+    if frontend_port is not None:
+        try:
+            frontend_port = int(frontend_port)
+        except (TypeError, ValueError):
+            return None
+        if not 1 <= frontend_port <= 65535:
+            return None
     return {"protocol": protocol, "request_id": request_id,
-            "requested_at": requested_at}
+            "requested_at": requested_at, "frontend_port": frontend_port}
 
 
 def is_stale(request: dict, max_age_seconds: int = REQUEST_MAX_AGE_SECONDS,
@@ -148,7 +163,20 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
                 result["detail"] = "pair has no recorded active_tunnel"
                 write_result(result_path, result)
                 return result
-            if target == current:
+            # A port change is a switch to the same protocol on a new
+            # frontend port. It must NOT take the already-on-target
+            # exit below: the tunnel has to move, with the switch's
+            # smoke check and rollback, even though the protocol
+            # name does not change.
+            current_frontend = pair.get("frontend_port",
+                                        pair.get("frontend", 443))
+            new_port = request.get("frontend_port")
+            port_change = (new_port is not None
+                           and int(new_port) != int(current_frontend))
+            if port_change:
+                result["port_from"] = int(current_frontend)
+                result["port_to"] = int(new_port)
+            if target == current and not port_change:
                 result.update(status="done", already=True,
                               detail="pair is already on %s" % target)
                 write_result(result_path, result)
@@ -157,30 +185,55 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
             # can be generated for (unknown protocol, unplannable
             # shape) is failed here, never handed to execute_failover.
             # This mirrors execute_failover's own plan_for exactly.
+            # A port change plans with the NEW port: a plan that
+            # cannot be built for it fails here, tunnel untouched.
             try:
                 protocols.generate_deployment(
                     target, pair["id"],
                     protocols.dial_address(pair["iran"], target),
                     protocols.dial_address(pair["foreign"], target),
-                    pair.get("frontend_port", pair.get("frontend", 443)),
+                    int(new_port) if port_change else current_frontend,
                     backend_port=pair.get("backend_port") or None)
             except Exception as exc:
                 result.update(status="failed",
                               detail="cannot plan %s: %s" % (target, exc))
                 write_result(result_path, result)
                 return result
+            # The forward leg deploys from a copy carrying the new
+            # port; the original pair dict keeps the old port, so the
+            # rollback leg below always redeploys what was working.
+            pair_for_switch = dict(pair)
+            if port_change:
+                pair_for_switch["frontend_port"] = int(new_port)
             ir_runner, fr_runner = _runners(monitor, pair)
             try:
                 out = monitor.manager.execute_failover(
-                    pair, current, target, reason="manual-switch",
+                    pair_for_switch, current, target,
+                    reason="manual-port-change" if port_change
+                    else "manual-switch",
                     ir_runner=ir_runner, fr_runner=fr_runner)
             finally:
                 _close(ir_runner, fr_runner)
             if out.get("success"):
-                result.update(status="done",
-                              detail="switched %s -> %s" % (current, target))
-                write_result(result_path, result)
-                return result
+                if port_change and not storage.set_pair_frontend_port(
+                        pair["id"], new_port):
+                    # The tunnel moved but the row did not: fall
+                    # through to the rollback leg below rather than
+                    # leave the next pass deploying a port the row
+                    # denies. The rollback redeploys the old port.
+                    out = {"restored": False,
+                           "error": "tunnel moved but the healer pair "
+                                    "row did not update"}
+                else:
+                    if port_change:
+                        detail = ("tunnel port %s -> %s (protocol %s "
+                                  "unchanged)"
+                                  % (current_frontend, new_port, current))
+                    else:
+                        detail = "switched %s -> %s" % (current, target)
+                    result.update(status="done", detail=detail)
+                    write_result(result_path, result)
+                    return result
             if out.get("blocked"):
                 result.update(status="refused",
                               detail=out.get("reason") or "switch refused")

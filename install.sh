@@ -39,7 +39,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.5.2"
+VERSION="1.5.3"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -729,6 +729,12 @@ node_join() { # $1=host $2=token $3=fingerprint
     local node_name
     node_name="$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9_.-')"
     [ -n "$node_name" ] || node_name="node"
+    # No port prompt here by design: the master assigns a random
+    # five-digit frontend port at join time (free on the master,
+    # shown on the dashboard and printed below after the join).
+    # The operator changes it from the dashboard afterwards when a
+    # specific port is wanted; the join API still accepts an
+    # explicit frontend_port for scripted use.
     local json resp code body err hub_pub
     json="$(TOKEN="$token" KTYPE="$ktype" KB64="$kb64" NNAME="$node_name" python3 -c 'import json,os; print(json.dumps({"token": os.environ["TOKEN"], "host_key_type": os.environ["KTYPE"], "host_key_b64": os.environ["KB64"], "name": os.environ["NNAME"]}))')"
     resp="$(curl -sS --max-time 30 --cacert /tmp/rahyaab-master-cert.pem -X POST "https://$host:$HUB_PORT/api/join" -H 'Content-Type: application/json' --data "$json" -w $'\n%{http_code}')" \
@@ -741,10 +747,12 @@ node_join() { # $1=host $2=token $3=fingerprint
     fi
     hub_pub="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hub_pubkey"])')" \
         || die "Master response was unreadable"
+    pair_port="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pair"]["frontend_port"])' 2>/dev/null || echo "")"
     mkdir -p /root/.ssh && chmod 700 /root/.ssh
     touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
     grep -qF "$hub_pub" /root/.ssh/authorized_keys || echo "$hub_pub" >> /root/.ssh/authorized_keys
     ok "Node joined the master; pair and tunnel creation started in the background on the master; check the master dashboard in a few minutes"
+    [ -n "$pair_port" ] && echo "Tunnel port on the master: $pair_port"
 }
 
 parse_join_input() { # $1=pasted command -> JOIN_HOST/JOIN_TOKEN/JOIN_FP

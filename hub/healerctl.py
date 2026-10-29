@@ -91,16 +91,22 @@ def restart(executor, pair_id: int) -> dict:
     return {"ok": rc == 0, "output": out.strip(), "error": err.strip()}
 
 
-def request_switch(executor, pair_id: int, protocol: str, request_id: str) -> dict:
+def request_switch(executor, pair_id: int, protocol: str, request_id: str,
+                   frontend_port: int | None = None) -> dict:
     """Ask the healer to switch to `protocol`, by request file.
 
     The payload is base64-wrapped so no quoting can mangle it, and the
     file is root-only: it is a control channel for the pair's only
-    controller, not a world-writable trigger.
+    controller, not a world-writable trigger. `frontend_port`, when
+    given, turns the request into a port change: same protocol, new
+    frontend port — the healer redeploys that protocol on the new
+    port with the switch's smoke check and rollback.
     """
-    payload = json.dumps({"protocol": protocol, "request_id": request_id,
-                          "requested_at": time.time()})
-    blob = base64.b64encode(payload.encode()).decode()
+    payload = {"protocol": protocol, "request_id": request_id,
+               "requested_at": time.time()}
+    if frontend_port is not None:
+        payload["frontend_port"] = int(frontend_port)
+    blob = base64.b64encode(json.dumps(payload).encode()).decode()
     path = switch_request_path(pair_id)
     rc, out, err = executor.run(
         f"printf '%s' '{blob}' | base64 -d > {path} "

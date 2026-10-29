@@ -17,9 +17,17 @@ The hub:
   the master has no pair with this node yet, and enqueues a
   full_setup job that measures, deploys the first tunnel and installs
   that pair's own healer instance. The very first pair keeps the
-  historic name; later pairs are named after their node, and each
-  gets the next free frontend port on the master (443, then 444, ...),
-  because two pairs on one master cannot share one frontend port.
+  historic name; later pairs are named after their node. The pair's
+  frontend port — the listener on the master that user traffic dials,
+  one port per pair — is either the port the join request asked for
+  or, when the request asks for none, a random five-digit port. A
+  requested port is refused when it is reserved, already used by
+  another pair, or already bound on the master; the random pick
+  skips all three as well, checked against the master's own socket
+  table (the hub runs on the master, so a local `ss` read is the
+  authoritative check). A re-join never changes an existing pair's
+  port: changing a live pair's port is the dashboard's change_port
+  job, never a side effect of joining again.
 
 No login is needed for /api/join: the token is the credential. A
 pair that already has a current protocol gets no new job — joining
@@ -28,8 +36,10 @@ never redeploys a live pair on its own.
 
 import hmac
 import os
+import random
 import re
 import secrets
+import subprocess
 
 DEFAULT_TOKEN_PATH = "/etc/rahyaab/join.token"
 DEFAULT_PUBKEY_PATH = "/etc/rahyaab/hub_key.pub"
@@ -149,13 +159,108 @@ def _free_pair_name(store, wanted: str) -> str:
     return "%s-%d" % (wanted, i)
 
 
-def _free_frontend_port(store, master_id: int) -> int:
-    """First free frontend port on this master, starting at 443."""
-    used = {int(p.get("frontend_port") or 0)
-            for p in store.list_pairs() if p["iran_server_id"] == master_id}
-    port = 443
-    while port in used:
-        port += 1
+# Ports a tunnel frontend may never take on the master: SSH (the
+# master's own SSH port is checked separately), the system ports the
+# orchestrator blacklists, and the hub panel's own port — the panel
+# binds 8890 on the same host, so a frontend there would collide
+# with the dashboard itself.
+RESERVED_FRONTEND_PORTS = frozenset({22, 53, 68, 123, 8890})
+
+# Random frontend ports live here: five digits, clear of the
+# well-known range where other services normally listen.
+RANDOM_PORT_LOW = 10000
+RANDOM_PORT_HIGH = 60000
+
+
+def validate_frontend_port(port, ssh_port: int = 22) -> int:
+    """Validate a requested tunnel frontend port. Returns the int.
+
+    Mirrors the orchestrator's safety gate (range + SSH/system
+    blacklist) plus the hub panel port, which also binds on the
+    master. Raises JoinError(400) on anything unusable.
+    """
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        raise JoinError(400, "frontend_port must be a number")
+    if not 1 <= p <= 65535:
+        raise JoinError(400, "frontend_port %d is out of range" % p)
+    if p == int(ssh_port or 22) or p in RESERVED_FRONTEND_PORTS:
+        raise JoinError(400, "frontend_port %d is reserved" % p)
+    return p
+
+
+def _ss_port_free(port: int) -> bool | None:
+    """True when `port` has no listener on this host (the master).
+
+    Reads the local socket table: the hub runs on the master, so this
+    is authoritative for the frontend's bind host. None when the
+    table cannot be read — the caller then accepts the port on the
+    strength of the other checks, and the deploy stays the backstop.
+    """
+    try:
+        out = subprocess.run(["ss", "-tln"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except Exception:
+        return None
+    marker = ":%d " % port
+    tab_marker = ":%d\t" % port
+    return marker not in out and tab_marker not in out
+
+
+def _pair_frontend_ports(store, master_id: int) -> set[int]:
+    return {int(p.get("frontend_port") or 0)
+            for p in store.list_pairs()
+            if p.get("iran_server_id") == master_id}
+
+
+def pick_frontend_port(store, master_id: int, ssh_port: int = 22,
+                       free_checker=None) -> int:
+    """Pick a random free frontend port for a new pair on `master_id`.
+
+    Skips reserved ports, ports other pairs on this master already
+    use, and ports with a live listener. `free_checker` is a callable
+    taking a port and returning True (free), False (bound) or None
+    (unknown); it defaults to the local socket table. An unknown
+    verdict is accepted — the deploy is the backstop — but a bound
+    verdict always re-rolls. Raises JoinError(500) when no port is
+    found after bounded tries.
+    """
+    used = _pair_frontend_ports(store, master_id)
+    check = free_checker or _ss_port_free
+    for _ in range(200):
+        port = random.randint(RANDOM_PORT_LOW, RANDOM_PORT_HIGH)
+        if port in used or port == int(ssh_port or 22):
+            continue
+        if port in RESERVED_FRONTEND_PORTS:
+            continue
+        if check(port) is False:
+            continue
+        return port
+    raise JoinError(500, "could not find a free tunnel port")
+
+
+def resolve_join_frontend_port(store, master: dict, body: dict,
+                               free_checker=None) -> int:
+    """Resolve the frontend port for a pair the join is about to create.
+
+    An explicitly requested port is validated and refused when it is
+    taken by another pair or bound on the master; an absent request
+    draws a random port. Raises JoinError on a refused request.
+    """
+    ssh_port = int(master.get("port") or 22)
+    used = _pair_frontend_ports(store, master["id"])
+    requested = body.get("frontend_port")
+    if requested is None or str(requested).strip() == "":
+        return pick_frontend_port(store, master["id"], ssh_port, free_checker)
+    port = validate_frontend_port(requested, ssh_port)
+    if port in used:
+        raise JoinError(400, "frontend_port %d is already used by another pair"
+                        % port)
+    check = free_checker or _ss_port_free
+    if check(port) is False:
+        raise JoinError(400, "frontend_port %d is already in use on the master"
+                        % port)
     return port
 
 
@@ -163,7 +268,8 @@ def join_node(store, body: dict, source_ip: str,
               token_file: str | None = None,
               pubkey_file: str | None = None,
               known_hosts: str | None = None,
-              hub_key: str | None = None) -> dict:
+              hub_key: str | None = None,
+              free_checker=None) -> dict:
     """Process one /api/join request. Returns server, pair, job, pubkey."""
     token_file = token_file or token_path()
     pubkey_file = pubkey_file or pubkey_path()
@@ -228,12 +334,18 @@ def join_node(store, body: dict, source_ip: str,
             pair_name = DEFAULT_PAIR_NAME
         else:
             pair_name = _free_pair_name(store, "جفت %s" % name)
+        # A requested port applies only to a pair created here. A
+        # re-join keeps the existing pair's port untouched: changing a
+        # live pair's port is the change_port job, never a join side
+        # effect, so a re-join body carrying a port is ignored.
+        frontend_port = resolve_join_frontend_port(
+            store, master, body, free_checker)
         pair = store.create_pair({
             "name": pair_name,
             "iran_server_id": master["id"],
             "foreign_server_id": node["id"],
             "healer_server_id": master["id"],
-            "frontend_port": _free_frontend_port(store, master["id"]),
+            "frontend_port": frontend_port,
             "current_protocol": None,
             "inner_iran": inner_iran,
             "inner_foreign": inner_foreign,

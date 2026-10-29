@@ -290,6 +290,13 @@ class Store:
                 (protocol, pair_id),
             )
 
+    def update_pair_frontend_port(self, pair_id: int, port: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pairs SET frontend_port = ? WHERE id = ?",
+                (int(port), pair_id),
+            )
+
     def update_pair_measurement(self, pair_id: int, candidate_scores: dict,
                                 current_protocol: str | None = None) -> None:
         """Wizard step: record measured scores (never invented ones).

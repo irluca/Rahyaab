@@ -266,7 +266,7 @@ def test_join_second_node_creates_second_pair_and_job(store_with_master, files):
     store, master = store_with_master
     first = _join(store, files, "203.0.113.20", name="node-a")
     assert first["pair"]["name"] == "جفت اصلی"
-    assert first["pair"]["frontend_port"] == 443
+    assert 10000 <= first["pair"]["frontend_port"] <= 60000
     assert first["pair"]["inner_iran"] == "10.10.11.1"
     _retoken(files)
     second = _join(store, files, "203.0.113.30", name="node-b")
@@ -276,12 +276,15 @@ def test_join_second_node_creates_second_pair_and_job(store_with_master, files):
     assert second["pair"]["name"] == "جفت node-b"
     assert second["pair"]["iran_server_id"] == master["id"]
     assert second["pair"]["foreign_server_id"] == second["server"]["id"]
-    assert second["pair"]["frontend_port"] == 444
+    # No sequential 443/444 anymore: each pair draws its own random
+    # five-digit port, distinct from the other pairs on the master.
+    assert 10000 <= second["pair"]["frontend_port"] <= 60000
+    assert second["pair"]["frontend_port"] != first["pair"]["frontend_port"]
     assert second["pair"]["inner_iran"] == "10.10.12.1"
     assert second["pair"]["inner_foreign"] == "10.10.12.2"
     assert second["job"]["type"] == "full_setup"
     assert second["job"]["pair_id"] == second["pair"]["id"]
-    assert second["job"]["input"]["frontend_port"] == 444
+    assert second["job"]["input"]["frontend_port"] == second["pair"]["frontend_port"]
     # The first pair is untouched by the second join.
     assert store.get_pair(first["pair"]["id"])["foreign_server_id"] == first["server"]["id"]
 
@@ -293,7 +296,8 @@ def test_join_same_name_different_host_suffixes(store_with_master, files):
     second = _join(store, files, "203.0.113.30", name="node-a")
     assert second["server"]["name"] == "node-a-2"
     assert second["pair"]["name"] == "جفت node-a-2"
-    assert second["pair"]["frontend_port"] == 444
+    assert 10000 <= second["pair"]["frontend_port"] <= 60000
+    assert second["pair"]["frontend_port"] != first["pair"]["frontend_port"]
     assert store.get_server(first["server"]["id"])["host"] == "203.0.113.20"
 
 

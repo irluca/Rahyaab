@@ -721,6 +721,36 @@ def set_pair_backend(pair_id: int, backend_port=None, backend_state=None) -> boo
                   f"{'cleared' if not port else port}")
     return True
 
+
+def set_pair_frontend_port(pair_id: int, port: int) -> bool:
+    """Move a pair's frontend port in the healer database.
+
+    This row is what the monitor reads on every pass (see
+    healer.build_pair_source), so it is the live truth for the
+    frontend port: a port change that only rewrote the healer
+    config would be ignored until a reinstall, because seed_db
+    never overwrites an existing row's frontend_port. The hub pair
+    row is updated separately by the hub job, from the same change.
+    """
+    port = int(port)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"frontend port {port} out of range")
+    with db_session() as conn:
+        cur = conn.cursor()
+        row = cur.execute("SELECT frontend_port FROM pairs WHERE id = ?",
+                          (pair_id,)).fetchone()
+        if row is None:
+            return False
+        previous = row["frontend_port"]
+        cur.execute("UPDATE pairs SET frontend_port = ?, updated_at = ? "
+                    "WHERE id = ?", (port, time.time(), pair_id))
+        updated = cur.rowcount > 0
+    if updated and port != previous:
+        log_audit(pair_id, "FRONTEND", "SUCCESS",
+                  f"Frontend port: {previous} -> {port}")
+    return updated
+
+
 def get_pairs() -> list[dict]:
     with db_session() as conn:
         cur = conn.cursor()

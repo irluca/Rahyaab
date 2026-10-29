@@ -345,6 +345,20 @@ class Hub:
             raise ApiError(400, "protocol is required")
         return self.store.create_job("switch", pair_id, {"protocol": protocol})
 
+    def change_port_pair(self, pair_id: int, body: dict) -> dict:
+        """Queue a tunnel port change job; the handler validates the port."""
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        try:
+            port = int(body.get("frontend_port") or 0)
+        except (TypeError, ValueError):
+            raise ApiError(400, "frontend_port must be a number")
+        if not 1 <= port <= 65535:
+            raise ApiError(400, "frontend_port out of range")
+        return self.store.create_job("change_port", pair_id,
+                                     {"frontend_port": port})
+
     def spoof_probe_pair(self, pair_id: int, body: dict) -> dict:
         """Queue a spoof probe job; the runner writes the verdict."""
         pair = self.store.get_pair(pair_id)
@@ -494,6 +508,9 @@ def make_handler(hub: Hub, static_dir=None):
             m = re.fullmatch(r"/api/pairs/(\d+)/switch", path)
             if m and method == "POST":
                 return 201, hub.switch_pair(int(m.group(1)), body), None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/change_port", path)
+            if m and method == "POST":
+                return 201, hub.change_port_pair(int(m.group(1)), body), None, False
             m = re.fullmatch(r"/api/pairs/(\d+)/spoof_probe", path)
             if m and method == "POST":
                 return 201, hub.spoof_probe_pair(int(m.group(1)), body), None, False

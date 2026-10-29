@@ -31,7 +31,17 @@ def test_load_request_round_trip_and_malformed(tmp_path):
     path = str(tmp_path / "req.json")
     _write(path, {"protocol": "ESP", "request_id": "abc", "requested_at": 1000.0})
     req = manual_switch.load_request(path)
-    assert req == {"protocol": "ESP", "request_id": "abc", "requested_at": 1000.0}
+    assert req == {"protocol": "ESP", "request_id": "abc", "requested_at": 1000.0,
+                   "frontend_port": None}
+    _write(path, {"protocol": "ESP", "request_id": "abc", "requested_at": 1000.0,
+                  "frontend_port": 23456})
+    assert manual_switch.load_request(path)["frontend_port"] == 23456
+    _write(path, {"protocol": "ESP", "request_id": "abc", "requested_at": 1000.0,
+                  "frontend_port": 0})
+    assert manual_switch.load_request(path) is None
+    _write(path, {"protocol": "ESP", "request_id": "abc", "requested_at": 1000.0,
+                  "frontend_port": "nope"})
+    assert manual_switch.load_request(path) is None
     _write(path, {"protocol": "ESP"})  # missing fields
     assert manual_switch.load_request(path) is None
     _write(path, {"protocol": "", "request_id": "abc", "requested_at": 1000.0})
@@ -45,7 +55,7 @@ def test_stale_and_consume(tmp_path):
     assert manual_switch.is_stale(req, now=1000.0 + 599) is False
     path = str(tmp_path / "req.json")
     _write(path, req)
-    assert manual_switch.consume(path) == req
+    assert manual_switch.consume(path) == dict(req, frontend_port=None)
     assert not os.path.exists(path)
     assert manual_switch.consume(path) is None
 

@@ -53,6 +53,18 @@ Spoof probe (added with the spoof gate):
   and 'closed' is what the dashboard names instead of silently
   lacking the protocol. A second probe for the same pair is refused
   while one's scope unit or pidfile is alive.
+
+Tunnel port change (added with the install-time port prompt):
+- change_port: move a pair's frontend port — the listener on the
+  master that user traffic dials. A carrier current protocol
+  (GRE/ESP) binds no frontend port, so the handler only rewrites
+  the healer's pair row and config and restarts the healer: the
+  tunnel itself is never touched. An overlay current protocol goes
+  through the healer's switch channel with the same protocol and
+  the new port, so it gets the switch's plan-first abort, smoke
+  check and rollback; on success the hub pair row takes the new
+  port. The hub never deploys: the healer is the pair's only
+  controller, exactly as with switch.
 """
 
 from __future__ import annotations
@@ -145,6 +157,146 @@ def _handle_switch(store, job, make_executor):
         time.sleep(5)
     return {"status": "unknown", "from": current, "to": protocol,
             "rolled_back": False,
+            "detail": "healer did not report within 600 seconds"}
+
+
+def _carrier_protocols():
+    """Protocols that bind no frontend port, from the engine's own list.
+
+    The hub reads the orchestrator's CARRIER_PROTOCOLS when it can
+    (same path dance as _handle_full_setup) so the two never drift;
+    the literal fallback keeps the hub working — and tested — without
+    the orchestrator on path.
+    """
+    try:
+        import os
+        import sys
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "orchestrator")
+        if path not in sys.path:
+            sys.path.insert(0, path)
+        import protocols
+        return tuple(protocols.CARRIER_PROTOCOLS)
+    except Exception:
+        return ("GRE", "ESP")
+
+
+# Runs on the healer host (the master) for a carrier pair's port
+# change: rewrite the healer pair row and the healer config's
+# frontend_port, atomically for the config. Base64-wrapped like
+# healerctl's request payload so no quoting can mangle it; argv
+# carries only the pair id and the new port, never a secret.
+_CARRIER_PORT_SCRIPT = """
+import json, os, sqlite3, sys
+pid, port = int(sys.argv[1]), int(sys.argv[2])
+db = "/var/lib/best-tunnel/healer-p%d.db" % pid
+cfg_path = "/etc/best-tunnel/healer-p%d.json" % pid
+conn = sqlite3.connect(db)
+cur = conn.execute(
+    "UPDATE pairs SET frontend_port = ? WHERE id = ?", (port, pid))
+if cur.rowcount == 0:
+    print("no healer pair row")
+    raise SystemExit(1)
+conn.commit()
+conn.close()
+with open(cfg_path, encoding="utf-8") as f:
+    cfg = json.load(f)
+cfg["frontend_port"] = port
+tmp = cfg_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2, sort_keys=True)
+os.replace(tmp, cfg_path)
+print("ok")
+"""
+
+
+def _handle_change_port(store, job, make_executor):
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("job has no pair")
+    try:
+        new_port = int((job.get("input") or {}).get("frontend_port") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("change_port job has no valid frontend_port")
+    if not 1 <= new_port <= 65535:
+        raise ValueError("frontend_port %d is out of range" % new_port)
+    current_port = int(pair.get("frontend_port") or 443)
+    if new_port == current_port:
+        return {"status": "already", "from": pair.get("current_protocol") or "",
+                "to": pair.get("current_protocol") or "",
+                "port_from": current_port, "port_to": new_port,
+                "tunnel_touched": False, "rolled_back": False, "detail": ""}
+    healer_server = store.get_server(pair["healer_server_id"])
+    ssh_port = int((healer_server or {}).get("port") or 22)
+    if new_port in {22, 53, 68, 123, 8890, ssh_port}:
+        raise ValueError("frontend_port %d is reserved" % new_port)
+    for other in store.list_pairs():
+        if (other["id"] != pair["id"]
+                and other.get("iran_server_id") == pair.get("iran_server_id")
+                and int(other.get("frontend_port") or 0) == new_port):
+            raise ValueError(
+                "frontend_port %d is already used by another pair" % new_port)
+    current = (pair.get("current_protocol") or "").strip()
+    if not current:
+        raise ValueError("pair has no active tunnel to move")
+    _, executor = _healer_executor(store, job, make_executor)
+    if current in _carrier_protocols():
+        # Carriers bind no frontend port: the tunnel is never
+        # touched. Rewrite the healer's row + config, restart the
+        # healer so the config half takes effect (a restart never
+        # cuts the tunnel), then take the new port in the hub row.
+        import base64
+        blob = base64.b64encode(_CARRIER_PORT_SCRIPT.encode()).decode()
+        rc, out, err = executor.run(
+            f"printf '%s' '{blob}' | base64 -d | python3 - "
+            f"{pair['id']} {new_port}", timeout=60)
+        if rc != 0 or "ok" not in out:
+            raise RuntimeError("could not rewrite healer port: %s"
+                               % (err.strip() or out.strip()))
+        restarted = healerctl.restart(executor, pair["id"])
+        if not restarted.get("ok"):
+            raise RuntimeError("could not restart healer: %s"
+                               % restarted.get("error"))
+        store.update_pair_frontend_port(pair["id"], new_port)
+        store.log_event("change_port",
+                        "Pair %s tunnel port %d -> %d (carrier: tunnel untouched)"
+                        % (pair["name"], current_port, new_port),
+                        pair_id=pair["id"])
+        return {"status": "done", "from": current, "to": current,
+                "port_from": current_port, "port_to": new_port,
+                "tunnel_touched": False, "rolled_back": False, "detail": ""}
+    request_id = uuid.uuid4().hex
+    req = healerctl.request_switch(executor, pair["id"], current, request_id,
+                                   frontend_port=new_port)
+    if not req.get("ok"):
+        raise RuntimeError("could not write port change request: %s"
+                           % req.get("error"))
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        res = healerctl.switch_result(executor, pair["id"], request_id)
+        if res is not None:
+            status = res.get("status")
+            output = {"status": status, "from": res.get("from"),
+                      "to": res.get("to"), "port_from": current_port,
+                      "port_to": new_port, "tunnel_touched": True,
+                      "rolled_back": bool(res.get("rolled_back")),
+                      "detail": res.get("detail") or ""}
+            if status == "done":
+                store.update_pair_frontend_port(pair["id"], new_port)
+                store.log_event("change_port",
+                                "Pair %s tunnel port %d -> %d"
+                                % (pair["name"], current_port, new_port),
+                                pair_id=pair["id"], data=res)
+            elif status in ("failed", "refused"):
+                store.log_event("change_port",
+                                "Port change of pair %s to %d ended %s"
+                                % (pair["name"], new_port, status),
+                                pair_id=pair["id"], data=res)
+            return output
+        time.sleep(5)
+    return {"status": "unknown", "from": current, "to": current,
+            "port_from": current_port, "port_to": new_port,
+            "tunnel_touched": True, "rolled_back": False,
             "detail": "healer did not report within 600 seconds"}
 
 
@@ -312,6 +464,7 @@ HANDLERS = {
     "connectivity": _handle_connectivity,
     "noop": _handle_noop,
     "switch": _handle_switch,
+    "change_port": _handle_change_port,
     "full_setup": _handle_full_setup,
     "sweep": _handle_sweep,
     "spoof_probe": _handle_spoof_probe,
