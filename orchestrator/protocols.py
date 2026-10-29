@@ -2407,6 +2407,517 @@ WantedBy=multi-user.target
         }
 
 # ---------------------------------------------------------
+# Bale Meet WebRTC overlay (bale-webrtc)
+# ---------------------------------------------------------
+# Traffic rides a Bale Meet video call: the joiner on the censored side
+# (Iran) exposes SOCKS5, the creator on the free side (foreign) runs the
+# call, and the SFU relays a DTLS-encrypted DataChannel between them.
+# The topology follows the reference project's headless design (Pion +
+# LiveKit, DC mode); only the plan is Rahyaab's, and the transport
+# binaries are deployed the way every other third-party transport here
+# is deployed (frp, xray, ...).
+#
+# Provisioning boundary (load-bearing): the generator NEVER writes the
+# join link or the Bale cookies. Both are operator-provisioned files:
+#   - the join link: <bale_dir>/<ns>-link-p<pair>.txt on Iran, fetched
+#     by the hub from the creator's call file on foreign;
+#   - the cookies: <bale_dir>/<ns>-cookies-p<pair>.json on foreign,
+#     exported once from the desktop Creator app.
+# Until the link file exists, the joiner wrapper sleeps and exits (the
+# unit restarts) instead of starting a joiner with an empty link; until
+# the cookies exist, the creator sits in WAITING_FOR_COOKIES. A deploy
+# therefore succeeds while unprovisioned and starts working the moment
+# provisioning lands, instead of failing the whole switch.
+#
+# Secrecy boundary: the join link is the tunnel's key material (the
+# reference derives the obfuscator secret from it), so it appears in NO
+# generated file and NO unit: the wrapper reads it from a 0600 file at
+# runtime. It still reaches the joiner binary via argv (the binary
+# accepts the link only as a flag), so it is visible in the joiner
+# process cmdline on the Iran host - acceptable there because only root
+# operates on these hosts, and documented here so the exposure is a
+# choice, not a surprise. The SOCKS credential is per-pair random and
+# lives in a 0600 file the same way; the forwarder reads it at startup.
+#
+# No daemon-to-daemon port exists (the SFU connection is outbound
+# HTTPS/WSS to Bale), so transport_port is accepted and ignored, and
+# ir_ip/fr_ip are unused: neither side dials the other directly.
+# Bench uses its own SOCKS port and file set so a bench Bale never
+# collides with a live one on the same host.
+
+_BALE_FORWARD_TEMPLATE = '''#!/usr/bin/env python3
+"""Frontend-to-SOCKS forwarder for the Bale overlay (generated file).
+
+Listens on the pair frontend and forwards each accepted TCP connection
+through the local Bale joiner SOCKS5 (with auth) to 127.0.0.1:backend,
+which the creator executes against its own localhost on the foreign
+host. Stdlib only; the SOCKS credential is read from a 0600 file at
+startup and never appears in this script.
+"""
+
+import socket
+import threading
+import time
+
+FRONTEND = __FRONTEND__
+BACKEND = __BACKEND__
+SOCKS_PORT = __SOCKS_PORT__
+CREDS_PATH = "__CREDS_PATH__"
+
+
+def creds():
+    user = passwd = ""
+    with open(CREDS_PATH) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("BALE_SOCKS_USER="):
+                user = line.split("=", 1)[1]
+            elif line.startswith("BALE_SOCKS_PASS="):
+                passwd = line.split("=", 1)[1]
+    return user, passwd
+
+
+def socks_connect():
+    user, passwd = creds()
+    last = None
+    for _ in range(6):
+        try:
+            sock = socket.create_connection(("127.0.0.1", SOCKS_PORT), timeout=10)
+            break
+        except OSError as exc:
+            last = exc
+            time.sleep(5)
+    else:
+        raise last
+    sock.sendall(b"\\x05\\x01\\x02")
+    resp = sock.recv(2)
+    if len(resp) < 2 or resp[0] != 5 or resp[1] != 2:
+        raise OSError("socks greeting rejected")
+    ub, pb = user.encode(), passwd.encode()
+    sock.sendall(bytes([1, len(ub)]) + ub + bytes([len(pb)]) + pb)
+    resp = sock.recv(2)
+    if len(resp) < 2 or resp[1] != 0:
+        raise OSError("socks auth failed")
+    sock.sendall(b"\\x05\\x01\\x00\\x01\\x7f\\x00\\x00\\x01" + BACKEND.to_bytes(2, "big"))
+    resp = sock.recv(10)
+    if len(resp) < 10 or resp[1] != 0:
+        raise OSError("socks connect failed")
+    return sock
+
+
+def relay(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def handle(client):
+    try:
+        remote = socks_connect()
+    except OSError:
+        client.close()
+        return
+    threading.Thread(target=relay, args=(client, remote), daemon=True).start()
+    relay(remote, client)
+    client.close()
+    remote.close()
+
+
+def main():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", FRONTEND))
+    srv.listen(64)
+    while True:
+        client, _ = srv.accept()
+        threading.Thread(target=handle, args=(client,), daemon=True).start()
+
+
+main()
+'''
+
+_BALE_JOINER_WRAPPER_TEMPLATE = '''#!/bin/sh
+# Joiner launcher (generated file). Reads the provisioned join link and
+# the SOCKS credential from 0600 files at runtime so neither appears in
+# any unit file or generated config. Until the link file exists, exit
+# (systemd restarts) instead of starting a joiner with an empty link.
+LINK_FILE="__LINK_PATH__"
+CREDS_FILE="__CREDS_PATH__"
+[ -s "$LINK_FILE" ] || { echo "bale join link not provisioned: $LINK_FILE" >&2; sleep 10; exit 1; }
+[ -x /usr/local/bin/headless-bale-joiner ] || { echo "headless-bale-joiner missing" >&2; exit 1; }
+USER=$(grep ^BALE_SOCKS_USER= "$CREDS_FILE" | cut -d= -f2)
+PASS=$(grep ^BALE_SOCKS_PASS= "$CREDS_FILE" | cut -d= -f2)
+exec /usr/local/bin/headless-bale-joiner --join-link "$(cat "$LINK_FILE")" --socks-port __SOCKS_PORT__ --socks-user "$USER" --socks-pass "$PASS" --tunnel-mode dc
+'''
+
+
+def generate_bale_webrtc(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0, namespace: str = "prod", backend_port: int = None) -> dict:
+    backend = int(backend_port) if backend_port else frontend
+    socks_port = (10800 if namespace == "prod" else 12800) + pair_id
+    user = f"tun{pair_id}"
+    pwd = rnd(24)
+    svc_ir_join = f"best-tunnel-{namespace}-p{pair_id}-bale-joiner"
+    svc_ir_fwd = f"best-tunnel-{namespace}-p{pair_id}-bale-forward"
+    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-bale-creator"
+    bale_dir = "/etc/best-tunnel/bale"
+    link_path = f"{bale_dir}/{namespace}-link-p{pair_id}.txt"
+    cookies_path = f"{bale_dir}/{namespace}-cookies-p{pair_id}.json"
+    creds_path = f"{bale_dir}/{namespace}-creds-p{pair_id}"
+    call_path = f"/var/run/whitelist-bypass/call-{namespace}-p{pair_id}.txt"
+    wrapper_path = f"/usr/local/bin/best-bale-joiner-p{pair_id}-{namespace}.sh"
+    forward_path = f"/usr/local/bin/best-bale-forward-p{pair_id}-{namespace}.py"
+    forward_src = (_BALE_FORWARD_TEMPLATE
+                   .replace("__FRONTEND__", str(frontend))
+                   .replace("__BACKEND__", str(backend))
+                   .replace("__SOCKS_PORT__", str(socks_port))
+                   .replace("__CREDS_PATH__", creds_path))
+    wrapper_src = (_BALE_JOINER_WRAPPER_TEMPLATE
+                   .replace("__LINK_PATH__", link_path)
+                   .replace("__CREDS_PATH__", creds_path)
+                   .replace("__SOCKS_PORT__", str(socks_port)))
+    joiner_unit = f"""[Unit]
+Description=Best Tunnel Bale Joiner ({namespace.title()} Pair {pair_id})
+After=network-online.target
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStart={wrapper_path}
+[Install]
+WantedBy=multi-user.target
+"""
+    forward_unit = f"""[Unit]
+Description=Best Tunnel Bale Forwarder ({namespace.title()} Pair {pair_id})
+After=network-online.target
+After={svc_ir_join}.service
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/python3 {forward_path}
+[Install]
+WantedBy=multi-user.target
+"""
+    creator_unit = f"""[Unit]
+Description=Best Tunnel Bale Creator ({namespace.title()} Pair {pair_id})
+After=network-online.target
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/headless-bale-creator --cookies {cookies_path} --write-file {call_path} --resources default
+[Install]
+WantedBy=multi-user.target
+"""
+    return {
+        "protocol": "bale-webrtc",
+        "iran_files": {
+            creds_path: f"BALE_SOCKS_USER={user}\nBALE_SOCKS_PASS={pwd}\n",
+            wrapper_path: wrapper_src,
+            forward_path: forward_src,
+            f"/etc/systemd/system/{svc_ir_join}.service": joiner_unit,
+            f"/etc/systemd/system/{svc_ir_fwd}.service": forward_unit,
+        },
+        "iran_units": [svc_ir_join, svc_ir_fwd],
+        "foreign_files": {
+            f"/etc/systemd/system/{svc_fr}.service": creator_unit,
+        },
+        "foreign_units": [svc_fr],
+        "iran_cmds": ["mkdir -p /etc/best-tunnel/bale"],
+        "foreign_cmds": ["mkdir -p /etc/best-tunnel/bale /var/run/whitelist-bypass"],
+        "teardown_iran": [f"systemctl stop {svc_ir_join} {svc_ir_fwd} 2>/dev/null || true",
+                          f"systemctl disable {svc_ir_join} {svc_ir_fwd} 2>/dev/null || true",
+                          f"rm -f /etc/systemd/system/{svc_ir_join}.service /etc/systemd/system/{svc_ir_fwd}.service {wrapper_path} {forward_path} {creds_path}"],
+        "teardown_foreign": [f"systemctl stop {svc_fr} 2>/dev/null || true",
+                             f"systemctl disable {svc_fr} 2>/dev/null || true",
+                             f"rm -f /etc/systemd/system/{svc_fr}.service"],
+    }
+
+
+# ---------------------------------------------------------
+# Spoofed-source WireGuard overlay (spoof-wireguard)
+# ---------------------------------------------------------
+# WireGuard over a UDP pipe whose packets carry a forged source IP.
+# The pipe daemon on each host owns one UDP socket bound to the pipe
+# port: packets arriving from 127.0.0.1 are local WireGuard traffic and
+# are re-sent through a raw socket with the provisioned spoof source
+# toward the peer's real address; packets arriving from anywhere else
+# are peer traffic and are handed to the local WireGuard listen port.
+# The distinction is sound because peer traffic always carries the
+# forged source, never the peer's real address, and local traffic
+# always comes from loopback. The WireGuard endpoint is the local pipe
+# (127.0.0.1:pipe_port), so no host ever dials the peer directly: the
+# only packets on the wire with the peer's real destination are the
+# forged-source ones, which is the entire point.
+#
+# Provisioning boundary, same shape as bale-webrtc: the generator NEVER
+# writes the spoof IP list. It is a provisioned file
+# (<spoof_dir>/<ns>-ips-p<pair>.txt) written by the probe job with the
+# IPs that actually arrived; the daemon reads the first line at
+# startup and exits (systemd restarts) until the file exists. The
+# WireGuard keys, by contrast, ARE generated here: WireGuard keys are
+# X25519 keys in base64, exactly what generate_noise_keypair already
+# produces, and the private halves live in 0600 files the units
+# reference by path (wg reads the key from the file, never from argv).
+#
+# Delivery follows the overlay contract (frontend -> backend through
+# the tunnel), not the carrier contract: no DNAT manifest, no
+# carrier_inner_pair extension. The WireGuard subnet is private to this
+# protocol (prod 10.14, bench 10.15) so it collides with neither GRE
+# (10.10/10.11) nor ESP (10.12/10.13). MTU 1280 follows the reference
+# spoof tunnel's WireGuard guidance for a forged-source path.
+
+_SPOOF_PIPE_TEMPLATE = '''#!/usr/bin/env python3
+"""Spoof UDP pipe daemon (generated file).
+
+One UDP socket bound to the pipe port serves both directions: loopback
+packets are local WireGuard traffic and leave through a raw socket with
+a forged source; anything else is peer traffic for the local WireGuard
+listen port. The spoof IP comes from a provisioned file (first line);
+the daemon exits until that file exists so systemd restarts it.
+"""
+
+import socket
+import struct
+import sys
+
+PIPE_PORT = __PIPE_PORT__
+WG_PORT = __WG_PORT__
+PEER_IP = "__PEER_IP__"
+IPS_PATH = "__IPS_PATH__"
+
+
+def _checksum(data):
+    if len(data) % 2:
+        data += b"\\x00"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    total = (total >> 16) + (total & 0xFFFF)
+    total += total >> 16
+    return (~total) & 0xFFFF
+
+
+def build_spoof_udp(spoof_ip, dst_ip, dst_port, payload, ident=0):
+    """A complete IPv4/UDP packet with a forged source. Pure bytes-in /
+    bytes-out so the wire format is pinned offline: a wrong checksum
+    here would make a capable path look incapable."""
+    udp_len = 8 + len(payload)
+    header0 = struct.pack("!HHHH", PIPE_PORT, dst_port, udp_len, 0)
+    pseudo = socket.inet_aton(spoof_ip) + socket.inet_aton(dst_ip) + struct.pack("!BBH", 0, 17, udp_len)
+    csum = _checksum(pseudo + header0 + payload)
+    udp = struct.pack("!HHHH", PIPE_PORT, dst_port, udp_len, csum) + payload
+    total_len = 20 + len(udp)
+    ip0 = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_len, ident, 0, 64, 17, 0,
+                      socket.inet_aton(spoof_ip), socket.inet_aton(dst_ip))
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_len, ident, 0, 64, 17,
+                     _checksum(ip0), socket.inet_aton(spoof_ip), socket.inet_aton(dst_ip))
+    return ip + udp
+
+
+def main():
+    try:
+        with open(IPS_PATH) as f:
+            ips = [line.strip() for line in f if line.strip()]
+    except OSError:
+        ips = []
+    if not ips:
+        print("no spoof IPs provisioned", file=sys.stderr)
+        return 1
+    spoof_ip = ips[0]
+    recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    recv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    recv.bind(("0.0.0.0", PIPE_PORT))
+    send = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+    send.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+    ident = 0
+    while True:
+        data, (src_ip, _src_port) = recv.recvfrom(65535)
+        if src_ip == "127.0.0.1":
+            ident = (ident + 1) & 0xFFFF
+            send.sendto(build_spoof_udp(spoof_ip, PEER_IP, PIPE_PORT, data, ident), (PEER_IP, 0))
+        else:
+            recv.sendto(data, ("127.0.0.1", WG_PORT))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+_SPOOF_FORWARD_TEMPLATE = '''#!/usr/bin/env python3
+"""Frontend-to-WireGuard forwarder for the spoof overlay (generated file).
+
+Listens on the pair frontend and forwards each accepted TCP connection
+through the local WireGuard interface to the peer's inner address.
+Stdlib only; no secrets (no SOCKS, no credentials).
+"""
+
+import socket
+import threading
+import time
+
+FRONTEND = __FRONTEND__
+FOREIGN_INNER = "__FOREIGN_INNER__"
+BACKEND = __BACKEND__
+
+
+def relay(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def handle(client):
+    remote = None
+    for _ in range(6):
+        try:
+            remote = socket.create_connection((FOREIGN_INNER, BACKEND), timeout=10)
+            break
+        except OSError:
+            time.sleep(5)
+    if remote is None:
+        client.close()
+        return
+    threading.Thread(target=relay, args=(client, remote), daemon=True).start()
+    relay(remote, client)
+    client.close()
+    remote.close()
+
+
+def main():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", FRONTEND))
+    srv.listen(64)
+    while True:
+        client, _ = srv.accept()
+        threading.Thread(target=handle, args=(client,), daemon=True).start()
+
+
+main()
+'''
+
+
+def generate_spoof_wireguard(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0, namespace: str = "prod", backend_port: int = None) -> dict:
+    backend = int(backend_port) if backend_port else frontend
+    idx = (pair_id % 200) + 10
+    octet = "10.14" if namespace == "prod" else "10.15"
+    tun_ir, tun_fr = f"{octet}.{idx}.1", f"{octet}.{idx}.2"
+    pipe_port = (51800 if namespace == "prod" else 52800) + pair_id
+    wg_port = (51900 if namespace == "prod" else 52900) + pair_id
+    iface = f"spoofwg{pair_id}{'b' if namespace == 'bench' else ''}"
+    svc_ir_pipe = f"best-tunnel-{namespace}-p{pair_id}-spoof-pipe"
+    svc_ir_fwd = f"best-tunnel-{namespace}-p{pair_id}-spoof-forward"
+    svc_fr_pipe = f"best-tunnel-{namespace}-p{pair_id}-spoof-pipe"
+    spoof_dir = "/etc/best-tunnel/spoof"
+    ips_path = f"{spoof_dir}/{namespace}-ips-p{pair_id}.txt"
+    ir_key_path = f"{spoof_dir}/{namespace}-key-p{pair_id}-iran"
+    fr_key_path = f"{spoof_dir}/{namespace}-key-p{pair_id}-foreign"
+    ir_priv, ir_pub = generate_noise_keypair()
+    fr_priv, fr_pub = generate_noise_keypair()
+    pipe_ir_path = f"/usr/local/bin/best-spoof-pipe-p{pair_id}-{namespace}-iran.py"
+    pipe_fr_path = f"/usr/local/bin/best-spoof-pipe-p{pair_id}-{namespace}-foreign.py"
+    forward_path = f"/usr/local/bin/best-spoof-forward-p{pair_id}-{namespace}.py"
+
+    def pipe_src(peer_ip):
+        return (_SPOOF_PIPE_TEMPLATE
+                .replace("__PIPE_PORT__", str(pipe_port))
+                .replace("__WG_PORT__", str(wg_port))
+                .replace("__PEER_IP__", peer_ip)
+                .replace("__IPS_PATH__", ips_path))
+
+    forward_src = (_SPOOF_FORWARD_TEMPLATE
+                   .replace("__FRONTEND__", str(frontend))
+                   .replace("__FOREIGN_INNER__", tun_fr)
+                   .replace("__BACKEND__", str(backend)))
+
+    def wg_unit(svc, local_inner, peer_pub, peer_inner):
+        return f"""[Unit]
+Description=Best Tunnel Spoof Pipe ({namespace.title()} Pair {pair_id})
+After=network-online.target
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStartPre=-/sbin/ip link del {iface}
+ExecStartPre=/sbin/ip link add dev {iface} type wireguard
+ExecStartPre=/usr/bin/wg set {iface} listen-port {wg_port} private-key {{KEY_PATH}} peer {peer_pub} allowed-ips {peer_inner}/32 endpoint 127.0.0.1:{pipe_port} persistent-keepalive 25
+ExecStartPre=/sbin/ip addr add {local_inner}/30 dev {iface}
+ExecStartPre=/sbin/ip link set {iface} up mtu 1280
+ExecStart=/usr/bin/python3 {{PIPE_PATH}}
+ExecStop=-/sbin/ip link del {iface}
+[Install]
+WantedBy=multi-user.target
+"""
+
+    ir_unit = wg_unit(svc_ir_pipe, tun_ir, fr_pub, tun_fr).replace("{KEY_PATH}", ir_key_path).replace("{PIPE_PATH}", pipe_ir_path)
+    fr_unit = wg_unit(svc_fr_pipe, tun_fr, ir_pub, tun_ir).replace("{KEY_PATH}", fr_key_path).replace("{PIPE_PATH}", pipe_fr_path)
+    forward_unit = f"""[Unit]
+Description=Best Tunnel Spoof Forwarder ({namespace.title()} Pair {pair_id})
+After=network-online.target
+After={svc_ir_pipe}.service
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/python3 {forward_path}
+[Install]
+WantedBy=multi-user.target
+"""
+    return {
+        "protocol": "spoof-wireguard",
+        "iran_files": {
+            ir_key_path: ir_priv + "\n",
+            pipe_ir_path: pipe_src(fr_ip),
+            forward_path: forward_src,
+            f"/etc/systemd/system/{svc_ir_pipe}.service": ir_unit,
+            f"/etc/systemd/system/{svc_ir_fwd}.service": forward_unit,
+        },
+        "iran_units": [svc_ir_pipe, svc_ir_fwd],
+        "foreign_files": {
+            fr_key_path: fr_priv + "\n",
+            pipe_fr_path: pipe_src(ir_ip),
+            f"/etc/systemd/system/{svc_fr_pipe}.service": fr_unit,
+        },
+        "foreign_units": [svc_fr_pipe],
+        "iran_cmds": ["mkdir -p /etc/best-tunnel/spoof",
+                      "which wg >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq wireguard-tools)"],
+        "foreign_cmds": ["mkdir -p /etc/best-tunnel/spoof",
+                         "which wg >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq wireguard-tools)"],
+        "teardown_iran": [f"systemctl stop {svc_ir_pipe} {svc_ir_fwd} 2>/dev/null || true",
+                          f"systemctl disable {svc_ir_pipe} {svc_ir_fwd} 2>/dev/null || true",
+                          f"rm -f /etc/systemd/system/{svc_ir_pipe}.service /etc/systemd/system/{svc_ir_fwd}.service {pipe_ir_path} {forward_path} {ir_key_path}"],
+        "teardown_foreign": [f"systemctl stop {svc_fr_pipe} 2>/dev/null || true",
+                             f"systemctl disable {svc_fr_pipe} 2>/dev/null || true",
+                             f"rm -f /etc/systemd/system/{svc_fr_pipe}.service {pipe_fr_path} {fr_key_path}"],
+    }
+
+
+# ---------------------------------------------------------
 # Master Protocol Dispatcher
 # ---------------------------------------------------------
 GENERATORS = {
@@ -2420,6 +2931,8 @@ GENERATORS = {
     "xray-reverse": generate_xray_reverse,
     "kcptun": generate_kcptun,
     "hysteria2": generate_hysteria2,
+    "bale-webrtc": generate_bale_webrtc,
+    "spoof-wireguard": generate_spoof_wireguard,
     "singbox-vless-reality": SingBoxAdapter.generate_vless_reality,
     "singbox-ss-2022": SingBoxAdapter.generate_shadowsocks_2022
 }
@@ -2433,7 +2946,8 @@ BASE_PROTOCOLS = [
     "wstunnel-v10",
     "xray-reverse",
     "kcptun",
-    "hysteria2"
+    "hysteria2",
+    "spoof-wireguard"
 ]
 SINGBOX_PROTOCOLS = [
     "singbox-vless-reality",
@@ -2458,13 +2972,22 @@ def is_singbox_enabled() -> bool:
 
 def get_supported_protocols() -> list[str]:
     """Single Source of Truth for active supported protocols.
-    BASE_PROTOCOLS (10, hysteria2 graduated 2026-10-24) plus
-    SINGBOX_PROTOCOLS (2), unless the operator re-quarantined sing-box
-    with BEST_TUNNEL_DISABLE_SINGBOX=1.
+    BASE_PROTOCOLS (11: hysteria2 graduated 2026-10-24, spoof-wireguard
+    gated 2026-10-29) plus SINGBOX_PROTOCOLS (2), unless the operator
+    re-quarantined sing-box with BEST_TUNNEL_DISABLE_SINGBOX=1.
+
+    Spoof is probe-gated, not score-gated: a pair whose spoof probe did
+    not pass on both sides must never see it as a candidate, so the
+    sweep sets BEST_TUNNEL_SKIP_SPOOF=1 for such pairs and the ladder
+    skips it entirely instead of benching a tunnel that cannot work.
     """
+    import os
+    base = list(BASE_PROTOCOLS)
+    if os.getenv("BEST_TUNNEL_SKIP_SPOOF", "0").strip().lower() in ("1", "true", "yes"):
+        base = [p for p in base if p != "spoof-wireguard"]
     if is_singbox_enabled():
-        return list(BASE_PROTOCOLS) + list(SINGBOX_PROTOCOLS)
-    return list(BASE_PROTOCOLS)
+        return base + list(SINGBOX_PROTOCOLS)
+    return base
 
 SUPPORTED_PROTOCOLS = get_supported_protocols()
 ALL_PROTOCOLS = list(GENERATORS.keys())
@@ -2515,6 +3038,8 @@ DESTINATION_MECHANISM = {
     "xray-reverse": "vmess inter-connect with security=none: no TLS layer, no peer authentication",
     "singbox-ss-2022": "Shadowsocks-2022 pre-shared key: a key both sides hold, so no destination identity",
     "hysteria2": "QUIC+TLS, server certificate pinned by fingerprint and trusted as the client's CA",
+    "bale-webrtc": "WebRTC DataChannel through the Bale Meet SFU (DTLS between the two peers); the join link is the tunnel's key material, provisioned as a file, never embedded in a unit",
+    "spoof-wireguard": "WireGuard (Noise, X25519) over a UDP pipe with forged source IPs; the spoof IP list is provisioned, never embedded",
 }
 
 
@@ -2642,6 +3167,10 @@ BACKEND_TARGETS = {
                   "foreign", "hysteria2 tcpForwarding to loopback"),
     "backhaul-wss": ("iran_files", r'ports\s*=\s*\["\d+=(?P<backend>\d+)"\]',
                      "foreign", "backhaul port map: remote=local on the client host"),
+    "bale-webrtc": ("iran_files", r"BACKEND\s*=\s*(?P<backend>\d+)",
+                    "foreign", "bale forwarder SOCKS CONNECT executed by the creator on foreign localhost"),
+    "spoof-wireguard": ("iran_files", r"BACKEND\s*=\s*(?P<backend>\d+)",
+                        "foreign", "spoof forwarder direct TCP to foreign wg inner"),
     "GRE": ("foreign_files", r'-i\s+grep\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
             "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
     "ESP": ("foreign_files", r'-i\s+espp\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
@@ -2659,7 +3188,7 @@ BACKEND_EGRESS_PROXIES = ("singbox-vless-reality", "singbox-ss-2022")
 # delivery port means changing the DNAT destination on Iran *and* the INPUT rule on Foreign *and* the
 # firewall manifest *and* their mirrored deletes, which is its own change with its own hardware A/B.
 BACKEND_PORT_DECLARABLE = ("xray-reverse", "chisel-wss", "wstunnel-v10", "frp-TLS", "kcptun",
-                           "rathole-noise", "backhaul-wss", "hysteria2")
+                           "rathole-noise", "backhaul-wss", "hysteria2", "bale-webrtc", "spoof-wireguard")
 
 
 def backend_target(protocol: str, plan: dict) -> dict:

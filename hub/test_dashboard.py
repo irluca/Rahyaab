@@ -85,3 +85,18 @@ def test_dashboard_served_and_history_recorded(running):
     history = json.loads(body)["history"]
     assert len(history) == 1
     assert history[0]["reachable"] == 1 and history[0]["unit_active"] == 1
+
+
+def test_dashboard_serves_spoof_verdict_chip(running):
+    port = running
+    status, _, body = get(port, "/static/app.js")
+    assert status == 200
+    assert b"spoof_status" in body
+    assert "اسپوف بسته است".encode() in body
+    assert "اسپوف باز است".encode() in body
+    assert b"reprobe-btn" in body
+    assert b"spoof_probe" in body
+    status, _, css = get(port, "/static/style.css")
+    assert status == 200
+    assert b".proto-chip.pending" in css
+    assert b"reprobe-btn" in css

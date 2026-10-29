@@ -345,6 +345,18 @@ class Hub:
             raise ApiError(400, "protocol is required")
         return self.store.create_job("switch", pair_id, {"protocol": protocol})
 
+    def spoof_probe_pair(self, pair_id: int, body: dict) -> dict:
+        """Queue a spoof probe job; the runner writes the verdict."""
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        spoof_ips = body.get("spoof_ips") or []
+        if isinstance(spoof_ips, str):
+            spoof_ips = [spoof_ips]
+        spoof_ips = [str(ip).strip() for ip in spoof_ips if str(ip).strip()]
+        return self.store.create_job("spoof_probe", pair_id,
+                                     {"spoof_ips": spoof_ips})
+
 
 _STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
@@ -482,6 +494,9 @@ def make_handler(hub: Hub, static_dir=None):
             m = re.fullmatch(r"/api/pairs/(\d+)/switch", path)
             if m and method == "POST":
                 return 201, hub.switch_pair(int(m.group(1)), body), None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/spoof_probe", path)
+            if m and method == "POST":
+                return 201, hub.spoof_probe_pair(int(m.group(1)), body), None, False
             m = re.fullmatch(r"/api/pairs/(\d+)/history", path)
             if m and method == "GET":
                 pair = hub.store.get_pair(int(m.group(1)))

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS pairs (
     inner_iran TEXT,
     inner_foreign TEXT,
     candidate_scores TEXT NOT NULL DEFAULT '{}',
+    spoof_status TEXT NOT NULL DEFAULT 'unknown',
     healer_last_status TEXT,
     healer_last_seen REAL,
     created_at REAL NOT NULL
@@ -120,6 +121,12 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # CREATE TABLE IF NOT EXISTS never adds a column to a hub.db
+            # created before the column existed; migrate in place.
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(pairs)")]
+            if "spoof_status" not in cols:
+                conn.execute("ALTER TABLE pairs ADD COLUMN "
+                             "spoof_status TEXT NOT NULL DEFAULT 'unknown'")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -261,6 +268,21 @@ class Store:
                  status.get("heartbeat_age_seconds")),
             )
 
+    def update_pair_spoof_status(self, pair_id: int, status: str) -> None:
+        """Record a pair's spoof probe verdict: 'unknown', 'open', or
+        'closed'. 'open' means the forged-source probe arrived on both
+        sides; 'closed' means at least one side dropped it; 'unknown'
+        means the probe itself did not complete. The dashboard reads
+        this column, and the sweep reads it to decide whether the
+        spoof ladder runs at all."""
+        if status not in ("unknown", "open", "closed"):
+            raise ValueError("invalid spoof_status: %r" % (status,))
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pairs SET spoof_status = ? WHERE id = ?",
+                (status, pair_id),
+            )
+
     def update_pair_protocol(self, pair_id: int, protocol: str) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -339,6 +361,15 @@ class Store:
             )
             job_id = cur.lastrowid
         return self.get_job(job_id)
+
+    def has_queued_job(self, job_type: str, pair_id: int) -> bool:
+        """True while a job of this type for this pair still waits."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE type = ? AND pair_id = ?"
+                " AND status = 'queued'",
+                (job_type, pair_id)).fetchone()
+            return row[0] > 0
 
     def get_job(self, job_id: int) -> dict | None:
         with self._connect() as conn:

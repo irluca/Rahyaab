@@ -287,8 +287,17 @@ class FailoverCandidateSelector:
         candidates.pop(current_protocol, None)
 
         if candidates:
-            # Sort descending by score
-            sorted_candidates = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
+            # Rank by score, but last-resort protocols sort after every
+            # ordinary one no matter what they scored: in hard
+            # conditions the healer tries ordinary protocols first, then
+            # Bale, then spoof as the final fallback. Within the last
+            # tier Bale precedes spoof. A last-resort protocol with a
+            # higher score must never jump the queue ahead of a working
+            # ordinary protocol.
+            _LAST_TIER = {"bale-webrtc": 1, "spoof-wireguard": 2}
+            sorted_candidates = sorted(
+                candidates.items(),
+                key=lambda x: (_LAST_TIER.get(x[0], 0), -x[1]))
             return sorted_candidates[0][0]
 
         # Deterministic fallback list if no benchmark exists yet

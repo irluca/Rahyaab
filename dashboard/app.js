@@ -93,7 +93,9 @@ function renderPairs() {
     // rejected even if a later sweep could not measure it. Rejected cards
     // are spans, never buttons, and the switch job would refuse them too.
     const qualified = Object.entries(p.candidate_scores || {})
-      .filter(([, score]) => score > 0).sort((a, b) => b[1] - a[1]);
+      .filter(([name, score]) => score > 0
+        && !(name === "spoof-wireguard" && p.spoof_status === "closed"))
+      .sort((a, b) => b[1] - a[1]);
     const scoreCards = qualified.map(([name, score]) => {
       const active = p.current_protocol && name === p.current_protocol;
       const head = `<span class="proto-name"><span class="proto-dot ${active ? "pulse" : ""}"></span><span class="ltr">${name}</span><span>🔗</span></span>`;
@@ -106,8 +108,22 @@ function renderPairs() {
       .sort((a, b) => a.protocol.localeCompare(b.protocol));
     const rejectedCards = rejected.map(r =>
       `<span class="proto-chip rejected"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">${r.protocol}</span><span>🔗</span></span><span class="proto-score">${rejectedReason(r)}</span><span class="state-pill rejected">رد شده</span></span>`);
-    const scoreChips = (scoreCards.length || rejectedCards.length)
-      ? scoreCards.concat(rejectedCards).join("")
+    // Spoof verdict card: the probe verdict is a pair property, not a
+    // benchmark score, so it renders even when spoof has no score. A
+    // closed verdict hides a stale score chip (the verdict is newer
+    // evidence than the score); an open verdict without a score yet
+    // shows as pending until the sweep measures it. Unknown shows
+    // nothing: the probe is coming (auto-enqueued after setup and on
+    // hub start), and the card must not nag before it runs.
+    const spoofScore = (p.candidate_scores || {})["spoof-wireguard"] || 0;
+    let spoofCard = "";
+    if (p.spoof_status === "closed") {
+      spoofCard = `<span class="proto-chip rejected"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">spoof-wireguard</span><span>🔗</span></span><span class="proto-score">اسپوف بسته است</span><button type="button" class="reprobe-btn">بررسی دوباره</button></span>`;
+    } else if (p.spoof_status === "open" && !(spoofScore > 0)) {
+      spoofCard = `<span class="proto-chip pending"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">spoof-wireguard</span><span>🔗</span></span><span class="proto-score">اسپوف باز است؛ در انتظار بنچمارک</span></span>`;
+    }
+    const scoreChips = (scoreCards.length || rejectedCards.length || spoofCard)
+      ? scoreCards.concat(rejectedCards).join("") + spoofCard
       : '<p class="muted small">امتیازی ثبت نشده است.</p>';
     const iran = state.servers.find(s => s.id === p.iran_server_id);
     const foreign = state.servers.find(s => s.id === p.foreign_server_id);
@@ -154,6 +170,13 @@ function renderPairs() {
       btn.onclick = () => {
         const pair = state.pairs.find(x => x.id === +id);
         openSwitchDialog(+id, pair ? pair.current_protocol : "", btn.dataset.proto);
+      };
+    });
+    card.querySelectorAll("button.reprobe-btn").forEach(btn => {
+      btn.onclick = async () => {
+        await api("POST", "/api/jobs", { type: "spoof_probe", pair_id: +id });
+        showBanner("بررسی اسپوف ساخته شد؛ چند ثانیه دیگر تازه‌سازی کنید.");
+        setTimeout(loadAll, 3000);
       };
     });
     // The 20-second auto-refresh re-renders cards mid-switch; keep the

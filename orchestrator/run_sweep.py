@@ -187,6 +187,14 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
         "underlay_carrier": (pair.get("current_protocol") or "GRE").lower(),
     }
 
+    # Spoof is probe-gated, not score-gated: the ladder benches it only
+    # for pairs whose probe passed on both sides. Every other pair
+    # skips it entirely instead of benching a tunnel that cannot work.
+    if (pair.get("spoof_status") or "unknown") != "open":
+        os.environ["BEST_TUNNEL_SKIP_SPOOF"] = "1"
+    else:
+        os.environ.pop("BEST_TUNNEL_SKIP_SPOOF", None)
+
     # storage.DB_PATH is read at engine import time, so the env var must
     # be set before the import — exactly like a hand-run sweep script.
     os.environ["BEST_TUNNEL_DB_PATH"] = healer_db

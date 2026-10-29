@@ -1180,7 +1180,8 @@ class TestSupervisoryCompliance(unittest.TestCase):
         default set is all 11 and the toggle that remains is the operator's
         kill switch (BEST_TUNNEL_DISABLE_SINGBOX=1 re-quarantines).
         Hysteria2 graduated the same day (live witness over GRE + iperf),
-        so the base is 10 and the default set is 12.
+        and spoof-wireguard joined the base gated 2026-10-29, so the base
+        is 11 and the default set is 13.
         """
         # 1. Default state: graduated set. Asserted against the live resolver:
         #    protocols.SUPPORTED_PROTOCOLS is frozen at import time, so it reflects whatever the
@@ -1188,31 +1189,33 @@ class TestSupervisoryCompliance(unittest.TestCase):
         os.environ.pop("BEST_TUNNEL_ENABLE_SINGBOX", None)
         os.environ.pop("BEST_TUNNEL_DISABLE_SINGBOX", None)
         active_protos = protocols.get_supported_protocols()
-        # 10 base since hysteria2 graduated (a real overlay this product
-        # builds and benchmarks, not a flag-gated experiment), plus the 2
-        # graduated sing-box protocols.
-        self.assertEqual(len(active_protos), 12)
+        # 11 base since hysteria2 graduated (a real overlay this product
+        # builds and benchmarks, not a flag-gated experiment) and
+        # spoof-wireguard joined gated, plus the 2 graduated sing-box
+        # protocols.
+        self.assertEqual(len(active_protos), 13)
         self.assertIn("ESP", active_protos)
         self.assertIn("GRE", active_protos)
         self.assertIn("hysteria2", active_protos)
+        self.assertIn("spoof-wireguard", active_protos)
         self.assertIn("singbox-vless-reality", active_protos)
         self.assertIn("singbox-ss-2022", active_protos)
         self.assertTrue(set(active_protos).issubset(set(protocols.ALL_PROTOCOLS)))
         # The engine must resolve the set live, not from an import-time snapshot
         self.assertEqual(engine.get_supported_protocols(), active_protos)
 
-        # 2. Kill switch: re-quarantined back to the base 10.
+        # 2. Kill switch: re-quarantined back to the base 11.
         os.environ["BEST_TUNNEL_DISABLE_SINGBOX"] = "1"
         try:
             reduced = protocols.get_supported_protocols()
-            self.assertEqual(len(reduced), 10)
+            self.assertEqual(len(reduced), 11)
             self.assertEqual(reduced, protocols.BASE_PROTOCOLS)
             self.assertIn("hysteria2", reduced)
             self.assertNotIn("singbox-vless-reality", reduced)
             self.assertEqual(engine.get_supported_protocols(), reduced)
         finally:
             os.environ.pop("BEST_TUNNEL_DISABLE_SINGBOX", None)
-        self.assertEqual(len(engine.get_supported_protocols()), 12)
+        self.assertEqual(len(engine.get_supported_protocols()), 13)
 
     def test_134_singbox_graduation_is_real_for_the_selector(self):
         """Graduation is not a label: once sing-box is first-class, benchmark

@@ -40,6 +40,19 @@ Auto-sweep (added with the staged dashboard):
   so the dashboard fills in gradually; it never touches the live
   tunnel or current_protocol. A second sweep for the same pair is
   refused while one's scope unit or pidfile is alive.
+
+Spoof probe (added with the spoof gate):
+- spoof_probe: after a full_setup succeeds, the worker also enqueues
+  a probe job for the pair, and the operator can re-queue it any
+  time. The handler only spawns a detached systemd scope unit
+  running orchestrator/run_spoof_probe.py and returns at once — the
+  probe takes ~40 seconds for both directions and must never hold
+  the worker thread. The runner writes the verdict (open / closed /
+  unknown) to the pair row and logs an event; 'open' on both sides
+  is what lets the sweep bench spoof and the healer consider it,
+  and 'closed' is what the dashboard names instead of silently
+  lacking the protocol. A second probe for the same pair is refused
+  while one's scope unit or pidfile is alive.
 """
 
 from __future__ import annotations
@@ -207,6 +220,69 @@ def _spawn_sweep(argv):
                             start_new_session=True)
 
 
+def _probe_script_path():
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "orchestrator", "run_spoof_probe.py")
+
+
+def _probe_pidfile(pair_id):
+    import os
+    base = os.environ.get("RAHYAAB_SWEEP_DIR", "/var/lib/rahyaab")
+    return os.path.join(base, "spoof-probe-p%d.pid" % int(pair_id))
+
+
+def _probe_running(pair_id):
+    """Mirror of _sweep_running for the probe scope unit."""
+    import os
+    import subprocess
+    try:
+        rc = subprocess.run(
+            ["systemctl", "is-active",
+             "rahyaab-spoof-probe-p%d.scope" % int(pair_id)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if rc == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        with open(_probe_pidfile(pair_id)) as f:
+            pid = int(f.read().strip().split()[0])
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _handle_spoof_probe(store, job, make_executor):
+    import os
+    import shlex
+    import sys
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("spoof_probe job has no pair")
+    pair_id = pair["id"]
+    if _probe_running(pair_id):
+        return {"status": "already-running", "pair_id": pair_id}
+    script = _probe_script_path()
+    if not os.path.exists(script):
+        raise FileNotFoundError("spoof probe runner not found: %s" % script)
+    log = "/var/log/rahyaab-spoof-probe-p%d.log" % pair_id
+    ips = (job.get("input") or {}).get("spoof_ips") or []
+    if isinstance(ips, str):
+        ips = [ips]
+    ips_arg = (" --spoof-ips %s" % shlex.quote(",".join(ips))) if ips else ""
+    inner = ("%s %s --pair-id %d --hub-db %s%s > %s 2>&1; echo EXIT_CODE:$? >> %s" % (
+        shlex.quote(sys.executable), shlex.quote(script), pair_id,
+        shlex.quote(str(store.db_path)), ips_arg,
+        shlex.quote(log), shlex.quote(log)))
+    argv = ["systemd-run", "--scope", "--unit=rahyaab-spoof-probe-p%d" % pair_id,
+            "bash", "-c", inner]
+    _spawn_sweep(argv)
+    return {"status": "started", "pair_id": pair_id,
+            "unit": "rahyaab-spoof-probe-p%d.scope" % pair_id, "log": log}
+
+
 def _handle_sweep(store, job, make_executor):
     import os
     import shlex
@@ -238,7 +314,33 @@ HANDLERS = {
     "switch": _handle_switch,
     "full_setup": _handle_full_setup,
     "sweep": _handle_sweep,
+    "spoof_probe": _handle_spoof_probe,
 }
+
+
+def backfill_spoof_probes(store) -> list[int]:
+    """Enqueue a probe for every pair whose verdict is still unknown.
+
+    Called once at hub start (production entry point only, never from
+    the worker): pairs joined after the spoof gate get their probe
+    from the full_setup path, but pairs created before it would
+    otherwise never be checked, and the rule is every pair. A pair
+    with a queued probe is never duplicated; a pair whose probe
+    failed stays unknown and re-queues on the next start, which
+    self-heals once the runner exists.
+    """
+    enqueued = []
+    for pair in store.list_pairs():
+        if (pair.get("spoof_status") or "unknown") != "unknown":
+            continue
+        try:
+            if store.has_queued_job("spoof_probe", pair["id"]):
+                continue
+            store.create_job("spoof_probe", pair["id"], {})
+            enqueued.append(pair["id"])
+        except Exception:
+            pass
+    return enqueued
 
 
 class Worker(threading.Thread):
@@ -276,10 +378,16 @@ class Worker(threading.Thread):
                 self.store.finish_job(job["id"], output, None)
                 if job["type"] == "full_setup" and job.get("pair_id"):
                     # The first tunnel is up; measure the rest in the
-                    # background so the dashboard fills in gradually.
+                    # background so the dashboard fills in gradually,
+                    # and probe spoof for this pair so its verdict is
+                    # known (open / closed) rather than assumed.
                     # A failed enqueue must never break the worker loop.
                     try:
                         self.store.create_job("sweep", job["pair_id"], {})
+                    except Exception:
+                        pass
+                    try:
+                        self.store.create_job("spoof_probe", job["pair_id"], {})
                     except Exception:
                         pass
             except Exception as exc:

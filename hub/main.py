@@ -44,6 +44,13 @@ def main(argv=None) -> int:
     server = serve(store, host=args.host, port=args.port,
                    tls_cert=args.tls_cert, tls_key=args.tls_key,
                    enable_collector=True)
+    # Every pair gets a spoof verdict, including pairs created before
+    # the gate landed; a failed enqueue here must never break startup.
+    try:
+        from hub import jobs as _jobs
+        _jobs.backfill_spoof_probes(store)
+    except Exception:
+        pass
     scheme = "https" if args.tls_cert else "http"
     print(f"rahyaab hub listening on {scheme}://{args.host}:{args.port} "
           f"(db: {args.db})", flush=True)

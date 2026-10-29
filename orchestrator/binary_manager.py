@@ -44,6 +44,22 @@ OFFICIAL_CHECKSUMS = {
             }
         }
     },
+    # Bale Meet creator (headless): verified by direct download of the
+    # v0.1.2 linux-x64 asset plus --help on 2026-10-29; raw binary, so
+    # the installed hash equals the download hash. The headless JOINER
+    # has no upstream release asset in any release (v0.1.0-v0.1.2 all
+    # checked) and is built from source separately, so it has no pin
+    # here: its verified install fails closed until that step lands.
+    "headless-bale-creator": {
+        "v0.1.2": {
+            "amd64": {
+                "sha256": "fcf69426b83ad06f20a6e2ac2301edbabbc51cbcd1a6a02b9cbdfe743f9aabba",
+                "url": "https://github.com/kulikov0/whitelist-bypass-iran/releases/download/v0.1.2/headless-bale-creator-linux-x64",
+                "archive": "raw",
+                "binaries": {"headless-bale-creator": "/usr/local/bin/headless-bale-creator"}
+            }
+        }
+    },
     "rathole": {
         "v0.5.0": {
             "amd64": {
@@ -136,6 +152,10 @@ PINNED_INSTALLED_SHA256 = {
     ("hysteria", "v2.13.0", "amd64"): {
         "/usr/local/bin/hysteria": "907ba8c9693edb104b20582681fb7dc15639d5b64a9cbb616a7b539190a86691",
     },
+    # Raw binary, same construction: verified by download + --help.
+    ("headless-bale-creator", "v0.1.2", "amd64"): {
+        "/usr/local/bin/headless-bale-creator": "fcf69426b83ad06f20a6e2ac2301edbabbc51cbcd1a6a02b9cbdfe743f9aabba",
+    },
     ("backhaul", "v0.7.2", "amd64"): {
         "/usr/local/bin/backhaul": "7f1b1439d7fe1d15ae0b376e15614fe13d8a12f6e07a90263e310ea2a9d601fb",
     },
@@ -173,6 +193,13 @@ APT_PACKAGES = {
             "/usr/local/bin/kcptun-client": "/usr/bin/kcptun-client",
             "/usr/local/bin/kcptun-server": "/usr/bin/kcptun-server"
         }
+    },
+    "wireguard-tools": {
+        "package": "wireguard-tools",
+        "probe": "wg",
+        "verify": 'WG_VER=$(wg --version | head -n 1)\necho "[SUCCESS] wg verified: $WG_VER"',
+        # Units address /usr/bin/wg, where Debian installs it; no links needed.
+        "links": {}
     }
 }
 
@@ -407,6 +434,8 @@ PROTOCOL_BINARIES = {
     "singbox-vless-reality": ("sing-box",),
     "singbox-ss-2022": ("sing-box",),
     "hysteria2": ("hysteria",),
+    "bale-webrtc": ("headless-bale-creator", "headless-bale-joiner"),
+    "spoof-wireguard": ("wireguard-tools",),
 }
 
 

@@ -234,18 +234,20 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
    fills on hover. Only this key opens the switch dialog; the card
    itself is not clickable. The active card shows a "connected" pill
    instead of a key, and rejected cards show a dimmed "rejected" pill. */
-.switch-btn { margin-top: 3px; font: inherit; font-size: 11px; font-weight: 800;
+.switch-btn, .reprobe-btn { margin-top: 3px; font: inherit; font-size: 11px; font-weight: 800;
   color: var(--accent); background: transparent; border: 1px solid var(--accent);
   border-radius: 999px; padding: 3px 14px; cursor: pointer; transition: all .15s; }
-.switch-btn:hover { background: var(--accent); color: #081120; box-shadow: 0 4px 14px #4ea8ff55; }
-[data-theme="light"] .switch-btn:hover { color: #fff; }
-.switch-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch-btn:hover, .reprobe-btn:hover { background: var(--accent); color: #081120; box-shadow: 0 4px 14px #4ea8ff55; }
+[data-theme="light"] .switch-btn:hover, [data-theme="light"] .reprobe-btn:hover { color: #fff; }
+.switch-btn:focus-visible, .reprobe-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .state-pill { margin-top: 3px; font-size: 11px; font-weight: 800;
   border: 1px solid transparent; border-radius: 999px; padding: 3px 14px; }
 .state-pill.connected { color: var(--green); border-color: #3ddc8455; }
 .state-pill.rejected { color: var(--muted); border-style: dashed; border-color: var(--muted); }
 .proto-chip.rejected { opacity: .6; border-style: dashed; }
 .proto-chip.rejected .proto-dot { background: var(--muted); box-shadow: none; }
+.proto-chip.pending { opacity: .75; border-style: dotted; }
+.proto-chip.pending .proto-dot { background: var(--muted); box-shadow: none; }
 .proto-chip.rejected .proto-score { direction: rtl; }
 .tunnel-box.switching .proto-chips { opacity: .55; pointer-events: none; }
 .switch-status { display: flex; align-items: center; gap: 8px; margin-top: 12px;
