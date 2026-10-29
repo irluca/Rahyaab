@@ -182,18 +182,115 @@ def _carrier_protocols():
 
 
 # Runs on the healer host (the master) for a carrier pair's port
-# change: rewrite the healer pair row and the healer config's
-# frontend_port, atomically for the config. Base64-wrapped like
-# healerctl's request payload so no quoting can mangle it; argv
-# carries only the pair id and the new port, never a secret.
+# change. Carriers bind no frontend *socket*, but the frontend port
+# is very much live in their firewall: the DNAT match and target
+# ports. Changing the records alone leaves the kernel forwarding
+# the old port, which is exactly the split-brain a dashboard port
+# change must not create. So this script moves the firewall too:
+# delete the old port's rules (looped until absent, because
+# repeated deploys have left duplicate rules on live hosts),
+# rewrite the pair's manifest to the new port, re-apply it with
+# the carrier's own reapply script, and verify new-present plus
+# old-absent before touching the healer row or config. A failure
+# anywhere before the row update leaves every record on the old
+# port, and a retry is safe: the delete and rewrite steps are
+# idempotent in both directions.
+# Base64-wrapped like healerctl's request payload so no quoting
+# can mangle it; argv carries only ids and ports, never a secret.
+# Paths come from the environment only for offline tests; on the
+# host they default to the production locations.
 _CARRIER_PORT_SCRIPT = """
-import json, os, sqlite3, sys
-pid, port = int(sys.argv[1]), int(sys.argv[2])
-db = "/var/lib/best-tunnel/healer-p%d.db" % pid
-cfg_path = "/etc/best-tunnel/healer-p%d.json" % pid
+import json, os, re, sqlite3, subprocess, sys
+pid, old_port, new_port = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+db = os.path.join(os.environ.get("BT_HEALER_DB_DIR", "/var/lib/best-tunnel"),
+                   "healer-p%d.db" % pid)
+cfg_path = os.path.join(os.environ.get("BT_HEALER_CFG_DIR", "/etc/best-tunnel"),
+                        "healer-p%d.json" % pid)
+fw_dir = os.environ.get("BT_FW_DIR", "/etc/best-tunnel/firewall")
+ipt = os.environ.get("BT_IPTABLES", "iptables")
+reapply = os.environ.get("BT_FW_REAPPLY", "/usr/local/sbin/best-tunnel-fw-reapply.sh")
+
+def ipt_cmd(row, op):
+    parts = row.split("|")
+    table, chain = parts[1], parts[2]
+    args = []
+    if table != "filter":
+        args += ["-t", table]
+    args += [op, chain] + parts[5].split()
+    return args
+
+def ipt_check(row):
+    return subprocess.run([ipt] + ipt_cmd(row, "-C"),
+                          capture_output=True).returncode == 0
+
+def swap_port(row, frm, to):
+    row = re.sub(r"(--dport\\s+)%d(?!\\d)" % frm, r"\\g<1>%d" % to, row)
+    row = re.sub(r"(--to-destination\\s+\\S+:)%d(?!\\d)" % frm,
+                 r"\\g<1>%d" % to, row)
+    return row
+
+def row_ports(row):
+    ports = set()
+    for m in re.finditer(r"--dport\\s+(\\d+)", row):
+        ports.add(int(m.group(1)))
+    for m in re.finditer(r"--to-destination\\s+\\S+:(\\d+)", row):
+        ports.add(int(m.group(1)))
+    return ports
+
+import glob
+cands = []
+for proto in ("gre", "esp"):
+    cands += glob.glob(os.path.join(
+        fw_dir, "best-tunnel-*-p%d-%s-fw.rules" % (pid, proto)))
+if len(cands) != 1:
+    print("expected exactly one carrier manifest, found %d" % len(cands))
+    raise SystemExit(1)
+manifest_path = cands[0]
+with open(manifest_path, encoding="utf-8") as f:
+    text = f.read()
+rows = [ln for ln in text.splitlines() if ln.startswith("R|")]
+port_rows = [r for r in rows if old_port in row_ports(r)
+             or new_port in row_ports(r)]
+if not port_rows:
+    print("manifest names no rule on either port")
+    raise SystemExit(1)
+for row in port_rows:
+    old_row = swap_port(row, new_port, old_port)
+    for _ in range(20):
+        if not ipt_check(old_row):
+            break
+        gone = subprocess.run([ipt] + ipt_cmd(old_row, "-D"),
+                              capture_output=True).returncode == 0
+        if not gone:
+            print("could not delete rule: %s" % old_row)
+            raise SystemExit(1)
+    else:
+        print("rule would not delete: %s" % old_row)
+        raise SystemExit(1)
+new_text = "\\n".join(
+    swap_port(ln, old_port, new_port) if ln.startswith("R|") else ln
+    for ln in text.splitlines()) + "\\n"
+tmp = manifest_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(new_text)
+os.replace(tmp, manifest_path)
+r = subprocess.run(["/bin/bash", reapply, manifest_path],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    print("reapply failed: %s" % (r.stdout.strip() or r.stderr.strip()))
+    raise SystemExit(1)
+for row in port_rows:
+    new_row = swap_port(row, old_port, new_port)
+    old_row = swap_port(row, new_port, old_port)
+    if not ipt_check(new_row):
+        print("new rule missing: %s" % new_row)
+        raise SystemExit(1)
+    if ipt_check(old_row):
+        print("old rule still present: %s" % old_row)
+        raise SystemExit(1)
 conn = sqlite3.connect(db)
 cur = conn.execute(
-    "UPDATE pairs SET frontend_port = ? WHERE id = ?", (port, pid))
+    "UPDATE pairs SET frontend_port = ? WHERE id = ?", (new_port, pid))
 if cur.rowcount == 0:
     print("no healer pair row")
     raise SystemExit(1)
@@ -201,7 +298,7 @@ conn.commit()
 conn.close()
 with open(cfg_path, encoding="utf-8") as f:
     cfg = json.load(f)
-cfg["frontend_port"] = port
+cfg["frontend_port"] = new_port
 tmp = cfg_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2, sort_keys=True)
@@ -241,17 +338,20 @@ def _handle_change_port(store, job, make_executor):
         raise ValueError("pair has no active tunnel to move")
     _, executor = _healer_executor(store, job, make_executor)
     if current in _carrier_protocols():
-        # Carriers bind no frontend port: the tunnel is never
-        # touched. Rewrite the healer's row + config, restart the
-        # healer so the config half takes effect (a restart never
-        # cuts the tunnel), then take the new port in the hub row.
+        # Carriers bind no frontend socket, but their DNAT match
+        # and target ports ARE the frontend port: the script moves
+        # the firewall rules with the records, or the dashboard
+        # would show a port no traffic follows. The tunnel
+        # interfaces are never touched. Restart the healer so the
+        # config half takes effect (a restart never cuts the
+        # tunnel), then take the new port in the hub row.
         import base64
         blob = base64.b64encode(_CARRIER_PORT_SCRIPT.encode()).decode()
         rc, out, err = executor.run(
             f"printf '%s' '{blob}' | base64 -d | python3 - "
-            f"{pair['id']} {new_port}", timeout=60)
+            f"{pair['id']} {current_port} {new_port}", timeout=60)
         if rc != 0 or "ok" not in out:
-            raise RuntimeError("could not rewrite healer port: %s"
+            raise RuntimeError("could not move carrier port: %s"
                                % (err.strip() or out.strip()))
         restarted = healerctl.restart(executor, pair["id"])
         if not restarted.get("ok"):
@@ -259,7 +359,7 @@ def _handle_change_port(store, job, make_executor):
                                % restarted.get("error"))
         store.update_pair_frontend_port(pair["id"], new_port)
         store.log_event("change_port",
-                        "Pair %s tunnel port %d -> %d (carrier: tunnel untouched)"
+                        "Pair %s tunnel port %d -> %d (carrier: interfaces untouched, DNAT moved)"
                         % (pair["name"], current_port, new_port),
                         pair_id=pair["id"])
         return {"status": "done", "from": current, "to": current,
