@@ -136,7 +136,7 @@ function renderPairs() {
           <div class="tunnel-badges">
             <span class="proto-badge ${protoClass(p.current_protocol)} ltr">${p.current_protocol || "—"}</span>
             <span class="badge ${cls}">${label}</span>
-            <span class="muted small">فرانت‌اند: <span class="ltr">${p.frontend_port || "—"}</span></span>
+            <span class="port-card">🔌 <span class="port-label">پورت تانل</span> <b class="ltr port-num">${p.frontend_port || "—"}</b></span>
           </div>
         </div>
         <div class="tunnel-kpis">

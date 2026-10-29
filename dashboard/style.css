@@ -173,6 +173,11 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4
 .proto-GRE { background: #4ea8ff22; color: var(--accent); border-color: #4ea8ff55; }
 .proto-ESP { background: #a78bfa22; color: var(--violet); border-color: #a78bfa55; }
 .proto-other { background: var(--panel2); color: var(--muted); border-color: var(--line); }
+.port-card { display: inline-flex; align-items: center; gap: 6px; background: var(--well-grad);
+  border: 1px solid var(--line); border-radius: 10px; padding: 5px 11px; font-size: 13px;
+  box-shadow: 0 2px 10px #00000022; }
+.port-card .port-label { color: var(--muted); }
+.port-card .port-num { font-size: 14px; font-weight: 800; color: var(--accent); }
 .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; }
 .badge.healthy { background: #3ddc8422; color: var(--green); }
 .badge.stale { background: #ffb02022; color: var(--amber); }
