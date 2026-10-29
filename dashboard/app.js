@@ -177,10 +177,28 @@ function renderPairs() {
         showBanner("پورت نامعتبر است؛ عددی بین ۱ تا ۶۵۵۳۵ وارد کنید.");
         return;
       }
-      if (!confirm(`پورت تانل این جفت از ${cur} به ${port} تغییر کند؟ اگر پروتکل فعلی اورلی باشد تانل برای لحظاتی بازاستقرار می‌شود و در صورت خرابی به پورت قبلی برمی‌گردد؛ اگر کریر باشد تانل دست نمی‌خورد.`)) return;
-      await api("POST", `/api/pairs/${id}/change_port`, { frontend_port: port });
-      showBanner("جاب تغییر پورت ساخته شد؛ چند ثانیه دیگر تازه‌سازی کنید.");
-      setTimeout(loadAll, 3000);
+      if (!confirm(`پورت تانل این جفت از ${cur} به ${port} تغییر کند؟ اگر پروتکل فعلی اورلی باشد تانل برای لحظاتی بازاستقرار می‌شود و در صورت خرابی به پورت قبلی برمی‌گردد؛ اگر کریر باشد تانل دست نمی‌خورد. پورت درگیر روی سرور ایران رد می‌شود.`)) return;
+      try {
+        const job = await api("POST", `/api/pairs/${id}/change_port`, { frontend_port: port });
+        showBanner("جاب تغییر پورت ساخته شد؛ نتیجه‌اش بررسی می‌شود…");
+        const done = await pollJob(job.id, 660);
+        loadAll();
+        if (!done) { showBanner("نتیجه تغییر پورت هنوز مشخص نیست؛ وضعیت تازه‌سازی می‌شود.", true, 15000); return; }
+        if (done.status === "failed") {
+          const err = done.error || "";
+          if (/busy on the master/i.test(err)) showBanner(`پورت ${port} روی سرور ایران درگیر است؛ پورت دیگری وارد کنید.`, true, 15000);
+          else showBanner("تغییر پورت خطا خورد: " + (err || "نامشخص"), true, 15000);
+          return;
+        }
+        const out = done.output || {};
+        if (out.status === "done") showBanner(`پورت تانل به ${port} تغییر کرد.`, false, 15000);
+        else if (out.status === "already") showBanner(`پورت همین حالا ${port} است.`, false, 15000);
+        else if (out.rolled_back) showBanner(`تغییر پورت ناموفق بود؛ تانل روی پورت ${out.port_from} برگشت و سالم است.`, true, 15000);
+        else showBanner("تغییر پورت ناموفق بود؛ تانل را بررسی کنید.", true, 15000);
+      } catch (e) {
+        loadAll();
+        showBanner("تغییر پورت انجام نشد: " + (e.message || "خطای شبکه"), true, 15000);
+      }
     };
     card.querySelectorAll("button.switch-btn").forEach(btn => {
       btn.onclick = () => {

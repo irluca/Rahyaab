@@ -94,6 +94,14 @@ def store(tmp_path):
     return Store(tmp_path / "hub.db")
 
 
+@pytest.fixture(autouse=True)
+def _free_socket_table(monkeypatch):
+    # The handler reads the live socket table; tests must not depend
+    # on this VM's listeners. Default: every port free; the busy
+    # tests below override this per test.
+    monkeypatch.setattr(jobs, "_ss_port_free", lambda port: True)
+
+
 def test_endpoint_validates_pair_and_port(store):
     # The worker starts with the Hub, so it gets the carrier fake:
     # the queued job then finishes through the real worker instead
@@ -142,6 +150,32 @@ def test_reserved_and_pair_used_ports_refused(store):
     with pytest.raises(ValueError):
         _run_handler(store, pair, fake, 34567)
     assert fake.commands == []
+
+
+def test_busy_port_refused_before_any_command(store, monkeypatch):
+    monkeypatch.setattr(jobs, "_ss_port_free", lambda port: False)
+    pair = _make_pair(store, protocol="GRE", port=8443)
+    fake = CarrierFakeExecutor()
+    with pytest.raises(ValueError, match="busy"):
+        _run_handler(store, pair, fake, 23457)
+    assert fake.commands == []
+    assert store.get_pair(pair["id"])["frontend_port"] == 8443
+
+
+def test_busy_port_refused_for_overlay_too(store, monkeypatch):
+    monkeypatch.setattr(jobs, "_ss_port_free", lambda port: False)
+    pair = _make_pair(store, protocol="chisel-wss", port=443)
+    fake = PortChangeFakeExecutor(_done_result)
+    with pytest.raises(ValueError, match="busy"):
+        _run_handler(store, pair, fake, 23456)
+    assert fake.commands == []
+
+
+def test_unreadable_socket_table_accepts_port(store, monkeypatch):
+    monkeypatch.setattr(jobs, "_ss_port_free", lambda port: None)
+    pair = _make_pair(store, protocol="GRE", port=443)
+    out = _run_handler(store, pair, CarrierFakeExecutor(), 23456)
+    assert out["status"] == "done"
 
 
 def test_pair_without_tunnel_refused(store):

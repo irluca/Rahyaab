@@ -74,6 +74,7 @@ import time
 import uuid
 
 from . import healerctl
+from .join import _ss_port_free
 from .ssh import executor_for_server
 
 
@@ -333,6 +334,15 @@ def _handle_change_port(store, job, make_executor):
                 and int(other.get("frontend_port") or 0) == new_port):
             raise ValueError(
                 "frontend_port %d is already used by another pair" % new_port)
+    # A port another service already listens on must never be taken:
+    # on a carrier the DNAT would shadow that service's inbound
+    # traffic. The hub runs on the master, so the local socket
+    # table is authoritative. None (unreadable) accepts the port,
+    # as at join time; the deploy stays the backstop. This runs
+    # before any executor is created, so a refusal touches nothing.
+    if _ss_port_free(new_port) is False:
+        raise ValueError(
+            "frontend_port %d is busy on the master" % new_port)
     current = (pair.get("current_protocol") or "").strip()
     if not current:
         raise ValueError("pair has no active tunnel to move")
