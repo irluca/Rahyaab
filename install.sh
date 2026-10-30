@@ -697,8 +697,8 @@ print_join_command() {
 
 verify_master_cert() { # $1=host $2=expected-fp (normalized)
     local host="$1" expected="$2" cert_pem="/tmp/rahyaab-master-cert.pem" actual
-    echo | openssl s_client -connect "$host:$HUB_PORT" -servername "$host" 2>/dev/null \
-        | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$cert_pem"
+    echo | timeout 15 openssl s_client -connect "$host:$HUB_PORT" -servername "$host" 2>/dev/null \
+        | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$cert_pem" || true
     [ -s "$cert_pem" ] || die "Secure connection to the master failed ($host:$HUB_PORT)"
     actual="$(norm_fp "$(cert_fingerprint "$cert_pem")")"
     [ "$actual" = "$expected" ] || die "Master certificate fingerprint does not match the join command; get a fresh command from the master (the certificate may have changed, or someone may be in the middle)"
