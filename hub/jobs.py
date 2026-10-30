@@ -144,6 +144,7 @@ def _handle_switch(store, job, make_executor):
             status = res.get("status")
             output = {"status": status, "from": res.get("from"),
                       "to": res.get("to"), "rolled_back": bool(res.get("rolled_back")),
+                      "transport_only": bool(res.get("transport_only")),
                       "detail": res.get("detail") or ""}
             if status == "done":
                 store.update_pair_protocol(pair["id"], protocol)

@@ -369,7 +369,8 @@ $("#switch-confirm").onclick = async () => {
     if (!done) { showBanner("نتیجه سوییچ هنوز مشخص نیست؛ وضعیت تازه‌سازی می‌شود.", true, 15000); return; }
     if (done.status === "failed") { showBanner("جاب سوییچ خطا خورد: " + (done.error || "نامشخص"), true, 15000); return; }
     const out = done.output || {};
-    if (out.status === "done") showBanner(`تانل به ${s.to} سوییچ شد و سالم است.`, false, 15000);
+    if (out.status === "done" && out.transport_only) showBanner(`تانل به ${s.to} سوییچ شد؛ ترنسپورت سالم است ولی سرویسی پشت این پورت نیست، پس کلاینت از این مسیر وصل نمی‌شود.`, true, 15000);
+    else if (out.status === "done") showBanner(`تانل به ${s.to} سوییچ شد و سالم است.`, false, 15000);
     else if (out.status === "already") showBanner(`تانل همین حالا روی ${s.to} است.`, false, 15000);
     else if (out.status === "refused") showBanner(refusedMessage(out.detail), true, 15000);
     else if (out.status === "unknown") showBanner("نتیجه سوییچ هنوز مشخص نیست؛ وضعیت تازه‌سازی می‌شود.", true, 15000);

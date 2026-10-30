@@ -458,6 +458,26 @@ def _carrier_manifest_path(plan: dict) -> str | None:
     return None
 
 
+def _transport_only_accept(ir_runner, fr_runner, frontend, backend_port) -> tuple[bool, str]:
+    """Mirror of engine.deploy_tunnel's transport-only branch, for the switch smoke checks.
+
+    A successor overlay whose units are active and whose frontend is listening has proven its
+    transport; when the delivery port on the peer answers nothing at all (no-backend), the missing
+    L7 round trip indicts the absent application behind the tunnel, not the tunnel. Only a
+    proven-absent backend accepts: a listening backend that fails the round trip (answered) or an
+    unreadable one still fails the switch, exactly as deploy_tunnel holds them. Callers only reach
+    here after the unit check passed, so units-active is already established.
+    """
+    read_port = int(backend_port) if backend_port not in (None, "", 0) else int(frontend)
+    backend_state, _why = engine.backend_listener_state(fr_runner, read_port)
+    if backend_state != "no-backend":
+        return False, ""
+    if not engine.check_port_status(ir_runner, frontend)["is_listening"]:
+        return False, ""
+    return True, (f"transport-only: frontend :{frontend} listening, units active, "
+                  f"no backend on peer :{read_port}")
+
+
 class FailoverManager:
     """Orchestrates staged switchover, anti-flapping hysteresis, and circuit breaker."""
 
@@ -846,6 +866,8 @@ class FailoverManager:
             # actually crosses - asked in the one form the successor is able to answer.
             smoke_ok = True
             smoke_detail = ""
+            transport_only = False
+            transport_only_detail = ""
             for u in new_plan.get("iran_units", []):
                 _, o_st, _ = ir_runner.run(f"systemctl is-active {u}", best_effort=True)
                 if o_st.strip() != "active":
@@ -877,9 +899,15 @@ class FailoverManager:
                                                   best_effort=True,
                                                   timeout=probe.cmd_timeout("lat"))
                     if not re.search(r'AVG:([0-9.]+)', o_smoke):
-                        smoke_ok = False
-                        smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
-                                        f"(probe output: {o_smoke.strip()[:60]!r})")
+                        ok_to, to_detail = _transport_only_accept(
+                            ir_runner, fr_runner, frontend, pair.get("backend_port") or None)
+                        if ok_to:
+                            transport_only = True
+                            transport_only_detail = to_detail
+                        else:
+                            smoke_ok = False
+                            smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
+                                            f"(probe output: {o_smoke.strip()[:60]!r})")
 
             duration_ms = round((time.time() - t_start) * 1000.0, 1)
 
@@ -920,6 +948,7 @@ class FailoverManager:
             storage.log_audit(
                 pair_id, "FAILOVER", "SUCCESS",
                 f"Successfully failed over {current_protocol} -> {target_protocol} in {duration_ms}ms. Trigger: {reason}"
+                + (f" ({transport_only_detail})" if transport_only else "")
             )
 
             return {
@@ -928,6 +957,8 @@ class FailoverManager:
                 "new_protocol": target_protocol,
                 "duration_ms": duration_ms,
                 "reason": reason,
+                "transport_only": transport_only,
+                "transport_only_detail": transport_only_detail,
                 "quarantined": ({"protocol": quarantined["protocol"],
                                  "expires_at": quarantined["expires_at"]}
                                 if quarantined else None)
@@ -1103,6 +1134,8 @@ class FailoverManager:
         # peer channel the carrier inners just gave it.
         smoke_ok = True
         smoke_detail = ""
+        transport_only = False
+        transport_only_detail = ""
         for u in new_plan.get("iran_units", []):
             _, o_st, _ = ir_runner.run(f"systemctl is-active {u}", best_effort=True)
             if o_st.strip() != "active":
@@ -1119,9 +1152,15 @@ class FailoverManager:
                                               best_effort=True,
                                               timeout=probe.cmd_timeout("lat"))
                 if not re.search(r'AVG:([0-9.]+)', o_smoke):
-                    smoke_ok = False
-                    smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
-                                    f"(probe output: {o_smoke.strip()[:60]!r})")
+                    ok_to, to_detail = _transport_only_accept(
+                        ir_runner, fr_runner, frontend, pair.get("backend_port") or None)
+                    if ok_to:
+                        transport_only = True
+                        transport_only_detail = to_detail
+                    else:
+                        smoke_ok = False
+                        smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
+                                        f"(probe output: {o_smoke.strip()[:60]!r})")
         if not smoke_ok:
             err_msg = f"Smoke verification failed for replacement protocol {target_protocol}: {smoke_detail}"
             storage.log_audit(pair_id, "FAILOVER_FAILED", "SMOKE_ERROR", err_msg)
@@ -1159,6 +1198,7 @@ class FailoverManager:
             pair_id, "FAILOVER", "SUCCESS",
             f"Successfully failed over {current_protocol} -> {target_protocol} in {duration_ms}ms. "
             f"Trigger: {reason} (overlay on live {current_protocol} underlay)"
+            + (f" ({transport_only_detail})" if transport_only else "")
         )
         return {
             "success": True,
@@ -1166,6 +1206,8 @@ class FailoverManager:
             "new_protocol": target_protocol,
             "duration_ms": duration_ms,
             "reason": reason,
+            "transport_only": transport_only,
+            "transport_only_detail": transport_only_detail,
             "quarantined": None
         }
 

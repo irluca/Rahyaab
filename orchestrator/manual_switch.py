@@ -232,6 +232,9 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
                     else:
                         detail = "switched %s -> %s" % (current, target)
                     result.update(status="done", detail=detail)
+                    if out.get("transport_only"):
+                        result["transport_only"] = True
+                        result["detail"] = detail + " (%s)" % out.get("transport_only_detail")
                     write_result(result_path, result)
                     return result
             if out.get("blocked"):

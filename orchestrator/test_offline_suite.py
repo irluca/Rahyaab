@@ -3753,6 +3753,69 @@ class TestSupervisoryCompliance(unittest.TestCase):
         actions = [a.get("action") for a in storage.get_audit_logs(limit=40)]
         self.assertIn("FAILOVER_FAILED", actions,
                       "the refusal must be in the audit trail the operator reads")
+    def test_159_transport_only_switch_accepts_a_proven_absent_backend(self):
+        """The mirror of test_46, for the case deploy_tunnel already accepts: the successor's
+        units are up and its frontend is listening, but the delivery port on the peer answers
+        nothing at all - no application behind the tunnel, not a broken tunnel. Live pair 1
+        (2026-10-29/30) failed every overlay switch this way: backend_port unset, so delivery
+        is the frontend number, and nothing listens there on the peer. The switch smoke must
+        accept that transport-only shape, while still refusing a backend that listens but does
+        not answer (answered) and a frontend that is not listening at all.
+
+        The flow cases use frontend 8898 because the mock binds a started best-tunnel unit's
+        listener to that port (its bench-frontend model); on a real host Stage 5's enable --now
+        binds the pair's actual frontend. The helper's own branches are covered directly with
+        arbitrary ports below.
+        """
+        ir_pub, fr_pub = "198.51.100.10", "203.0.113.20"
+        mgr = failover.FailoverManager(min_interval_seconds=0, max_failovers_per_window=10)
+
+        def fresh_pair():
+            pid = storage.add_pair(name=f"to_{int(time.time() * 1000)}", iran_host=ir_pub,
+                                   foreign_host=fr_pub, frontend_port=8898)
+            self.addCleanup(storage.delete_pair, pid)
+            storage.update_pair_status(pid, status="ACTIVE", active_tunnel="chisel-wss")
+            return {"id": pid, "name": "to", "frontend": 8898, "frontend_port": 8898,
+                    "iran": {"host": ir_pub, "port": 22}, "foreign": {"host": fr_pub, "port": 22}}
+
+        def runners(fr_listeners=None):
+            ir_m, fr_m = mock_ssh.MockSSHClient(host_role="iran"), mock_ssh.MockSSHClient(host_role="foreign")
+            if fr_listeners is not None:
+                fr_m.state["listeners"] = dict(fr_listeners)
+            ir_m.state["lat_no_sample"] = True
+            return ir_m, fr_m
+
+        # 1. Frontend listening (Stage 5 binds it) + peer backend absent -> success, flagged.
+        pair = fresh_pair()
+        ir_m, fr_m = runners()
+        res = mgr.execute_failover(pair, "chisel-wss", "wstunnel-v10", reason="transport-only",
+                                   dry_run=False, ir_runner=ir_m, fr_runner=fr_m)
+        self.assertTrue(res.get("success"), f"transport-only successor must succeed: {res.get('error')}")
+        self.assertTrue(res.get("transport_only"))
+        self.assertEqual(storage.get_pair(pair["id"]).get("active_tunnel"), "wstunnel-v10")
+
+        # 2. Backend listens but does not answer -> still a failure, as in test_46.
+        pair = fresh_pair()
+        ir_m, fr_m = runners({8898: "svc", 22: "sshd"})
+        res = mgr.execute_failover(pair, "chisel-wss", "wstunnel-v10", reason="answered backend",
+                                   dry_run=False, ir_runner=ir_m, fr_runner=fr_m)
+        self.assertFalse(res.get("success"))
+        self.assertIn("no L7 round-trip", str(res.get("error")))
+
+        # 3. The helper's own branches, with arbitrary ports.
+        def helper(ir_listeners, fr_listeners):
+            ir_m, fr_m = mock_ssh.MockSSHClient(host_role="iran"), mock_ssh.MockSSHClient(host_role="foreign")
+            ir_m.state["listeners"] = dict(ir_listeners)
+            fr_m.state["listeners"] = dict(fr_listeners)
+            return failover._transport_only_accept(ir_m, fr_m, 9443, None)
+
+        self.assertTrue(helper({9443: "frpc", 22: "sshd"}, {22: "sshd"})[0])
+        self.assertFalse(helper({22: "sshd"}, {22: "sshd"})[0],
+                         "a frontend that is not listening must not accept")
+        self.assertFalse(helper({9443: "frpc"}, {9443: "svc", 22: "sshd"})[0],
+                         "a listening backend that does not answer must not accept")
+        self.assertFalse(helper({9443: "frpc"}, {})[0],
+                         "an unreadable peer must not accept")
     def test_47_a_persisted_error_must_not_carry_a_routable_host_address(self):
         """The first live sweep row is evidence against the product: the bench GRE unit failed to
         restart, `SafeSSHRunner` raised "Remote command failed (exit 1) on <routable ip>: systemctl
