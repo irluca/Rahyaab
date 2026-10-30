@@ -469,11 +469,14 @@ def _transport_only_accept(ir_runner, fr_runner, frontend, backend_port) -> tupl
     here after the unit check passed, so units-active is already established.
     """
     read_port = int(backend_port) if backend_port not in (None, "", 0) else int(frontend)
-    backend_state, _why = engine.backend_listener_state(fr_runner, read_port)
+    backend_state, why = engine.backend_listener_state(fr_runner, read_port)
     if backend_state != "no-backend":
-        return False, ""
-    if not engine.check_port_status(ir_runner, frontend)["is_listening"]:
-        return False, ""
+        return False, (f"transport-only rejected: peer :{read_port} backend_state="
+                       f"{backend_state} ({why})")
+    port_status = engine.check_port_status(ir_runner, frontend)
+    if not port_status["is_listening"]:
+        return False, (f"transport-only rejected: frontend :{frontend} not listening "
+                       f"on Iran (ss: {port_status.get('listener_raw', '')!r})")
     return True, (f"transport-only: frontend :{frontend} listening, units active, "
                   f"no backend on peer :{read_port}")
 
@@ -907,7 +910,8 @@ class FailoverManager:
                         else:
                             smoke_ok = False
                             smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
-                                            f"(probe output: {o_smoke.strip()[:60]!r})")
+                                            f"(probe output: {o_smoke.strip()[:60]!r}) "
+                                            f"[{to_detail}]")
 
             duration_ms = round((time.time() - t_start) * 1000.0, 1)
 
@@ -1160,7 +1164,8 @@ class FailoverManager:
                     else:
                         smoke_ok = False
                         smoke_detail = (f"no L7 round-trip on 127.0.0.1:{frontend} "
-                                        f"(probe output: {o_smoke.strip()[:60]!r})")
+                                        f"(probe output: {o_smoke.strip()[:60]!r}) "
+                                        f"[{to_detail}]")
         if not smoke_ok:
             err_msg = f"Smoke verification failed for replacement protocol {target_protocol}: {smoke_detail}"
             storage.log_audit(pair_id, "FAILOVER_FAILED", "SMOKE_ERROR", err_msg)
