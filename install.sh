@@ -697,7 +697,13 @@ print_join_command() {
 
 verify_master_cert() { # $1=host $2=expected-fp (normalized)
     local host="$1" expected="$2" cert_pem="/tmp/rahyaab-master-cert.pem" actual
-    echo | timeout 15 openssl s_client -connect "$host:$HUB_PORT" -servername "$host" 2>/dev/null \
+    # No -servername: the hub serves a single certificate regardless of SNI,
+    # and sending an IP literal as SNI is invalid per RFC 6066 — middleboxes
+    # on the path drop such ClientHellos outright (observed: s_client with
+    # -servername <IP> hangs with zero output, while no-SNI and domain-SNI
+    # connect instantly). The fingerprint check below is what validates
+    # the certificate, so SNI adds nothing here.
+    echo | timeout 15 openssl s_client -connect "$host:$HUB_PORT" 2>/dev/null \
         | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$cert_pem" || true
     [ -s "$cert_pem" ] || die "Secure connection to the master failed ($host:$HUB_PORT)"
     actual="$(norm_fp "$(cert_fingerprint "$cert_pem")")"
