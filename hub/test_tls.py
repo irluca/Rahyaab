@@ -51,6 +51,26 @@ def https(port, method, path, body=None, cookie=None):
     return resp.status, headers_out, json.loads(raw or b"{}")
 
 
+def test_stalled_tls_handshake_does_not_wedge_server(tls_server):
+    """A client that opens TCP without completing TLS must not wedge the hub.
+
+    Regression test for the accept-thread wedge: with the listening socket
+    wrapped in TLS, one stalled handshake blocked the accept thread forever
+    (a blocking socket has no timeout) and the hub answered nothing
+    afterwards. The fix wraps each accepted socket with a 5s handshake
+    timeout, so the stalled connection fails alone and a normal HTTPS
+    request still succeeds (after at most the 5s handshake timeout).
+    """
+    import socket
+    port = tls_server
+    stalled = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        status, _, body = https(port, "GET", "/api/health")
+        assert status == 200 and body["ok"] is True
+    finally:
+        stalled.close()
+
+
 def test_https_health_hsts_and_secure_cookie(tls_server):
     port = tls_server
     status, headers, body = https(port, "GET", "/api/health")

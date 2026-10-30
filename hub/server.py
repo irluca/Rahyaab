@@ -597,7 +597,33 @@ def serve(store: Store, host: str = "127.0.0.1", port: int = 8890,
         import ssl
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls_cert, tls_key)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        # Never wrap the listening socket: SSLSocket.accept() runs the TLS
+        # handshake inline in the accept thread, so one client that opens
+        # TCP without completing the handshake (internet scanners do this
+        # within minutes of a fresh public port) blocks the accept thread
+        # forever — a blocking socket has no timeout — and wedges the
+        # whole hub: TCP connects but no request is ever answered, and
+        # the accept queue fills up. Wrap each accepted socket instead,
+        # with a handshake timeout; a stalled handshake then fails only
+        # that one connection (serve_forever ignores OSError from
+        # get_request) and the hub keeps serving everyone else.
+        _get_request = server.get_request
+
+        def get_request():
+            sock, addr = _get_request()
+            sock.settimeout(5)
+            try:
+                sock = context.wrap_socket(sock, server_side=True)
+            except OSError:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                raise
+            sock.settimeout(None)
+            return sock, addr
+
+        server.get_request = get_request
         hub.tls_enabled = True
     server.hub = hub  # type: ignore[attr-defined]
     return server
