@@ -6593,6 +6593,30 @@ dM/5IlBnpCMejDaKAYLbcLo=
                       "the operator has to be told the deploy state is indeterminate, not that it failed")
         self.assertIn("not classified read-only", msg, "and why nothing was re-issued")
 
+        # 3c. The one exception to (3b): a channel that never opened
+        #    carried no command bytes, so the far side never saw the
+        #    command and re-issuing it cannot double-apply - even when
+        #    the text is mutating. This is the live lossy-path
+        #    failure: paramiko raises SSHException("Timeout opening
+        #    channel.") from exec_command before anything is sent.
+        #    The runner matches failures by type name, so the fake
+        #    must be named SSHException to take the transient path.
+        class SSHException(Exception):
+            pass
+
+        reopened3 = []
+        channel_timeout = mock_ssh.SafeSSHRunner(
+            FlappingRawClient(raises=[SSHException("Timeout opening channel.")]),
+            hostname="203.0.113.20",
+            connector=lambda: (reopened3.append(FlappingRawClient(response="ok\n")),
+                               reopened3[-1])[1], sleep=lambda d: None)
+        status, out, err = channel_timeout.run("systemctl enable --now xray-portal")
+        self.assertEqual((status, out), (0, "ok\n"),
+                         "the command runs on the fresh session after the channel-open timeout")
+        self.assertEqual(reopened3[0].commands, ["systemctl enable --now xray-portal"],
+                         "a never-opened channel means the command was never sent, so it may be issued again")
+        self.assertEqual((channel_timeout.reconnects, channel_timeout.reissued), (1, 1))
+
         # 4. Waiting: grows, stops growing at the cap, is never identical twice - and the bookkeeping
         #    around a re-open has to reflect the most recent one, not the worst one so far.
         waits = []

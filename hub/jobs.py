@@ -422,12 +422,34 @@ def _handle_full_setup(store, job, make_executor):
     os.environ.setdefault("BEST_TUNNEL_DB_PATH", "/var/lib/rahyaab/wizard.db")
     sys.path.insert(0, os.path.join(root, "orchestrator"))
     import wizard_setup
-    result = wizard_setup.run_setup(
-        inp["iran_host"], inp["foreign_host"], pair["id"],
-        pair.get("name") or "", str(store.db_path),
-        inp.get("hub_key_path") or "/etc/rahyaab/hub_key",
-        frontend_port=int(inp.get("frontend_port") or 443),
-        protocol=inp.get("protocol") or "GRE")
+    try:
+        result = wizard_setup.run_setup(
+            inp["iran_host"], inp["foreign_host"], pair["id"],
+            pair.get("name") or "", str(store.db_path),
+            inp.get("hub_key_path") or "/etc/rahyaab/hub_key",
+            frontend_port=int(inp.get("frontend_port") or 443),
+            protocol=inp.get("protocol") or "GRE")
+    except Exception as exc:
+        # A transient transport failure must not kill the setup
+        # permanently: the measure leaves no production state behind
+        # (bench units only), so a fresh attempt is safe. Requeue
+        # boundedly; the single worker picks it up next. The measure
+        # wraps the transport error in a RuntimeError, so match on
+        # the message, not the type.
+        retries = 0
+        try:
+            retries = int(inp.get("retry_count") or 0)
+        except (TypeError, ValueError):
+            retries = 0
+        if "TransientTransportError" in str(exc) and retries < 2:
+            new_inp = dict(inp)
+            new_inp["retry_count"] = retries + 1
+            store.create_job("full_setup", pair["id"], new_inp)
+            store.log_event("full_setup",
+                            "Transient transport failure; retry %d/2 queued"
+                            % (retries + 1),
+                            pair_id=pair["id"])
+        raise
     store.log_event("full_setup",
                     "Pair %s set up: %s (score %s)"
                     % (pair["name"], result["protocol"], result["score"]),

@@ -852,14 +852,25 @@ class SafeSSHRunner:
         means "a non-zero exit is expected", not "the host was unreachable". Swallowing the drop would
         hand the health checker empty output for `systemctl is-active`, which reads as a dead unit, and
         the monitor would then switch protocols to heal an outage that was only its own SSH session.
+
+        A channel that never opened is the one exception to the
+        mutating rule: paramiko raises SSHException("Timeout opening
+        channel.") from exec_command before any command bytes leave,
+        so the far side never saw the command and re-issuing it cannot
+        double-apply. Such a failure is retried on a fresh session like
+        an inert command, even when the text is mutating - without this,
+        a single such timeout on a lossy path kills a whole setup,
+        because the benchmark's mutating commands are otherwise issued
+        once.
         """
         if not check_command_safe(cmd):
             raise PermissionError(f"SECURITY VIOLATION: Command blocked by safety policy: {cmd[:100]}")
         may_reissue = bool(retryable) and safety.is_read_only_command(cmd)
-        attempts = 1 + self._attempts if may_reissue else 1
+        max_attempts = 1 + self._attempts
         failure = None
+        failure_never_sent = False
         restored = False
-        for attempt in range(attempts):
+        for attempt in range(max_attempts):
             try:
                 status, out_str, err_str = self._exec_once(cmd, timeout)
             except TimeoutError as exc:
@@ -872,8 +883,13 @@ class SafeSSHRunner:
                 if not is_transient_transport_failure(exc):
                     raise
                 failure = (exc, attempt)
+                failure_never_sent = (type(exc).__name__ == "SSHException"
+                                      and "Timeout opening channel" in str(exc))
+                if not (may_reissue or failure_never_sent):
+                    restored = self.reopen()
+                    break
                 restored = self.reopen()
-                if attempt + 1 >= attempts or not restored:
+                if attempt + 1 >= max_attempts or not restored:
                     break
                 self.reissued += 1
                 continue
@@ -884,15 +900,18 @@ class SafeSSHRunner:
         exc, attempt = failure
         # What the recovery did has to be in the message, or "failed after 1 attempt(s)" reads like a
         # surrender when in fact three sessions were opened and none of them carried traffic.
-        never_sent = isinstance(exc, DeadSessionError) and not getattr(exc, "may_have_been_sent", False)
+        if failure_never_sent:
+            sent_note = "the channel never opened, so the command was never sent: "
+        elif isinstance(exc, DeadSessionError) and not getattr(exc, "may_have_been_sent", False):
+            sent_note = "the session was already down, so this was never sent: "
+        else:
+            sent_note = "command not completed, outcome of any already-sent side effect is unknown: "
         why = (f"SSH transport to {self.hostname} failed after {attempt + 1} attempt(s) on "
-               f"{type(exc).__name__}: {str(exc)[:180] or 'no message'} - "
-               + ("command not completed, outcome of any already-sent side effect is unknown: "
-                  if not never_sent else "the session was already down, so this was never sent: "))
+               f"{type(exc).__name__}: {str(exc)[:180] or 'no message'} - " + sent_note)
         if not restored:
             why += f"; the session was not re-opened: " \
                    f"{str(self.last_reopen_error or 'this transport has no connector')[:160]}"
-        elif not may_reissue:
+        elif not may_reissue and not failure_never_sent:
             why += "; the session came back, but the command is not classified read-only, so it was " \
                    f"not issued a second time"
         raise TransientTransportError(why, exc)

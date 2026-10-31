@@ -230,6 +230,79 @@ def test_full_setup_handler_calls_wizard_chain(tmp_path, monkeypatch):
     assert calls["key"] == "/etc/rahyaab/hub_key"
 
 
+def test_full_setup_handler_requeues_on_transient_failure(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "hub.db"))
+    master = register_self(str(tmp_path / "hub.db"), "203.0.113.10")
+    node = store.create_server({"name": "خارج", "host": "203.0.113.20",
+                                "port": 22, "username": "root",
+                                "key_path": None, "notes": ""})
+    pair = store.create_pair({
+        "name": "جفت اصلی", "iran_server_id": master["id"],
+        "foreign_server_id": node["id"], "healer_server_id": master["id"],
+        "frontend_port": 443, "current_protocol": None,
+        "inner_iran": "10.10.11.1", "inner_foreign": "10.10.11.2",
+        "candidate_scores": {}})
+    job = store.create_job("full_setup", pair["id"], {
+        "iran_host": "203.0.113.10", "foreign_host": "203.0.113.20",
+        "pair_name": "جفت اصلی", "hub_key_path": "/etc/rahyaab/hub_key",
+        "frontend_port": 443, "protocol": "GRE"})
+
+    class FailingWizard:
+        @staticmethod
+        def run_setup(iran, foreign, pid, name, db, key, frontend_port=443,
+                      protocol="GRE"):
+            raise RuntimeError(
+                "Protocol GRE did not measure cleanly: [\"Execution error: "
+                "TransientTransportError: ('SSH transport to 203.0.113.20 failed "
+                "after 1 attempt(s) on SSHException: Timeout opening channel.\"]")
+
+    monkeypatch.setitem(sys.modules, "wizard_setup", FailingWizard)
+    with pytest.raises(RuntimeError):
+        _handle_full_setup(store, job, None)
+    # The handler does not mark the original job (the worker does
+    # that); only the requeued job is new, so exclude the original.
+    queued = [j for j in store.list_jobs(pair["id"])
+              if j["type"] == "full_setup" and j["status"] == "queued"
+              and j["id"] != job["id"]]
+    assert len(queued) == 1
+    assert queued[0]["input"]["retry_count"] == 1
+    assert queued[0]["input"]["foreign_host"] == "203.0.113.20"
+    assert queued[0]["input"]["frontend_port"] == 443
+    assert queued[0]["input"]["protocol"] == "GRE"
+
+
+def test_full_setup_handler_does_not_requeue_after_two_retries(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "hub.db"))
+    master = register_self(str(tmp_path / "hub.db"), "203.0.113.10")
+    node = store.create_server({"name": "خارج", "host": "203.0.113.20",
+                                "port": 22, "username": "root",
+                                "key_path": None, "notes": ""})
+    pair = store.create_pair({
+        "name": "جفت اصلی", "iran_server_id": master["id"],
+        "foreign_server_id": node["id"], "healer_server_id": master["id"],
+        "frontend_port": 443, "current_protocol": None,
+        "inner_iran": "10.10.11.1", "inner_foreign": "10.10.11.2",
+        "candidate_scores": {}})
+    job = store.create_job("full_setup", pair["id"], {
+        "iran_host": "203.0.113.10", "foreign_host": "203.0.113.20",
+        "pair_name": "جفت اصلی", "hub_key_path": "/etc/rahyaab/hub_key",
+        "frontend_port": 443, "protocol": "GRE", "retry_count": 2})
+
+    class FailingWizard:
+        @staticmethod
+        def run_setup(iran, foreign, pid, name, db, key, frontend_port=443,
+                      protocol="GRE"):
+            raise RuntimeError("TransientTransportError: boom")
+
+    monkeypatch.setitem(sys.modules, "wizard_setup", FailingWizard)
+    with pytest.raises(RuntimeError):
+        _handle_full_setup(store, job, None)
+    queued = [j for j in store.list_jobs(pair["id"])
+              if j["type"] == "full_setup" and j["status"] == "queued"
+              and j["id"] != job["id"]]
+    assert queued == []
+
+
 def test_hub_join_node_maps_token_error_to_403(store_with_master, files, monkeypatch):
     store, _ = store_with_master
     monkeypatch.setenv("RAHYAAB_JOIN_TOKEN_PATH", files["token"])
