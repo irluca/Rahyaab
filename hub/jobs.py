@@ -621,6 +621,15 @@ class Worker(threading.Thread):
         self._stop_event.set()
 
     def run(self) -> None:
+        # Recover jobs orphaned by a previous hub process that died or
+        # was restarted mid-job; without this they sit 'running'
+        # forever and the pair's setup never completes. A failure here
+        # must not kill the worker: the poll loop below keeps working
+        # and the next restart retries the recovery.
+        try:
+            self.store.requeue_orphaned_jobs()
+        except Exception:
+            pass
         while not self._stop_event.is_set():
             try:
                 job = self.store.claim_queued_job()

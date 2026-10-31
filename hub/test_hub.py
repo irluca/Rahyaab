@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from hub import jobs
 from hub.server import serve
 from hub.ssh import FakeExecutor
 from hub.store import Store
@@ -149,3 +150,38 @@ def test_full_hub_flow(hub):
     assert status == 200
     status, _ = client.request("GET", "/api/servers")
     assert status == 401
+
+
+def test_worker_requeues_orphaned_running_job(tmp_path, monkeypatch):
+    """A job left 'running' by a dead hub process must resume on restart.
+
+    Regression test for the twice-orphaned full_setup: a hub restart
+    mid-job left the job 'running' forever (the worker only claims
+    'queued' jobs), so the pair's healer was never installed and the
+    dashboard stayed yellow with a stale warning. On worker start,
+    orphaned jobs go back to 'queued' and run.
+    """
+    store = Store(tmp_path / "hub.db")
+    job = store.create_job("fake_orphan", None, {})
+    # Simulate a previous hub process that claimed the job and died.
+    claimed = store.claim_queued_job()
+    assert claimed is not None and claimed["id"] == job["id"]
+    assert store.get_job(job["id"])["status"] == "running"
+    ran = []
+    monkeypatch.setitem(
+        jobs.HANDLERS, "fake_orphan",
+        lambda s, j, m: ran.append(j["id"]) or {"ok": True})
+    worker = jobs.Worker(store, poll_seconds=0.05)
+    worker.start()
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if store.get_job(job["id"])["status"] == "done":
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("orphaned job was not re-run to done")
+    finally:
+        worker.stop()
+        worker.join(timeout=5)
+    assert ran == [job["id"]]

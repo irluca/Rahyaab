@@ -394,6 +394,32 @@ class Store:
                     (pair_id, limit))
             return [_decode(r) for r in rows]
 
+    def requeue_orphaned_jobs(self) -> list[int]:
+        """Move jobs left 'running' by a dead worker back to 'queued'.
+
+        A hub restart (or crash) mid-job orphans the claimed job: the
+        worker only ever claims 'queued' jobs, so the orphan would sit
+        'running' forever and the pair's setup would stall with a
+        yellow, unmonitored dashboard. At worker start no worker is
+        running yet, so any 'running' row is orphaned by definition
+        and safe to re-queue; handlers tolerate a re-run (deploy
+        rewrites the same tunnel, switch returns 'already' for the
+        current protocol, sweep refuses a second concurrent scope).
+        Returns the re-queued job ids.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM jobs WHERE status = 'running' ORDER BY id"
+            ).fetchall()
+            ids = [r[0] for r in rows]
+            if ids:
+                conn.execute(
+                    "UPDATE jobs SET status = 'queued', updated_at = ?"
+                    " WHERE status = 'running'",
+                    (time.time(),),
+                )
+            return ids
+
     def claim_queued_job(self) -> dict | None:
         """Atomically move the oldest queued job to running, or None."""
         with self._connect() as conn:
