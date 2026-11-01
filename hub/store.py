@@ -129,9 +129,13 @@ class Store:
                              "spoof_status TEXT NOT NULL DEFAULT 'unknown'")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        # A hub write (metrics, jobs) can briefly hold the lock while the
+        # dashboard deletes a pair; without a busy timeout that delete
+        # fails instead of waiting a moment (seen 2026-11-01).
+        conn.execute("PRAGMA busy_timeout = 60000")
         return conn
 
     # -- users / sessions -------------------------------------------------

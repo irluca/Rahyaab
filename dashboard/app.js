@@ -263,7 +263,8 @@ function renderTables() {
     : '<p class="muted">هنوز جفتی ساخته نشده است.</p>';
   $$("#pair-table-wrap [data-del]").forEach(b => b.onclick = async () => {
     if (!confirm("این جفت حذف شود؟")) return;
-    await api("DELETE", `/api/pairs/${b.dataset.del}`); loadAll();
+    try { await api("DELETE", `/api/pairs/${b.dataset.del}`); loadAll(); }
+    catch (e) { showBanner(e.message, true); }
   });
   $("#event-list").innerHTML = state.events.map(e =>
     `<li><time>${faTime(e.created_at)}</time><div>${e.message}</div></li>`).join("");

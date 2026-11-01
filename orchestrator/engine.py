@@ -2160,6 +2160,19 @@ nohup python3 -u /tmp/best_test_backend.py >/dev/null 2>&1 & echo $! > /tmp/best
                 if protocol == "GRE":
                     ir_runner.run(f"ip tunnel del grep{pair_id}b", best_effort=True)
                     fr_runner.run(f"ip tunnel del grep{pair_id}b", best_effort=True)
+                if protocol == "ESP":
+                    # Mirror the GRE bench cleanup above: a bench VTI link
+                    # persists after its unit stops (by design no lifecycle
+                    # operation removes VTI links), and the prod deploy's
+                    # VTI gate refuses while any VTI holds the endpoint
+                    # pair - so an ESP full_setup blocked itself (jobs 10
+                    # and 11 on pair 3, 2026-11-01). Units are already
+                    # stopped above; the set-down first keeps the delete
+                    # off a loaded VTI (whose unregister parks), which is
+                    # the hazard the prod-carrier no-delete rule guards.
+                    iface = protocols.carrier_iface("ESP", pair_id, "bench")
+                    ir_runner.run(f"ip link set {iface} down 2>/dev/null; ip link delete {iface}", best_effort=True)
+                    fr_runner.run(f"ip link set {iface} down 2>/dev/null; ip link delete {iface}", best_effort=True)
             ir_runner.run("fuser -k 8897/tcp 8898/tcp; rm -f /tmp/best-test-* /tmp/best_test* /tmp/test*", best_effort=True)
             fr_runner.run("kill $(cat /tmp/best-test-backend.pid 2>/dev/null); fuser -k 8897/tcp 8898/tcp; rm -f /tmp/best-test-* /tmp/best_test_backend.py /tmp/best-test-backend.pid", best_effort=True)
         for runner in owned_runners:
