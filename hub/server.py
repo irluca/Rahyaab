@@ -607,6 +607,15 @@ def serve(store: Store, host: str = "127.0.0.1", port: int = 8890,
         # with a handshake timeout; a stalled handshake then fails only
         # that one connection (serve_forever ignores OSError from
         # get_request) and the hub keeps serving everyone else.
+        # After the handshake, keep a generous timeout instead of going
+        # back to blocking forever: a client that completes TLS but never
+        # sends a request would otherwise park a handler thread forever,
+        # and parked threads accumulate until thread creation fails and
+        # the accept loop dies with it (hub wedged on 2026-11-01: alive,
+        # listening, 6 connections queued, nothing answered). No endpoint
+        # holds a connection anywhere near 120 s — switch/change_port only
+        # enqueue jobs and the dashboard polls — so 120 s never cuts a
+        # legitimate request.
         _get_request = server.get_request
 
         def get_request():
@@ -620,7 +629,7 @@ def serve(store: Store, host: str = "127.0.0.1", port: int = 8890,
                 except OSError:
                     pass
                 raise
-            sock.settimeout(None)
+            sock.settimeout(120)
             return sock, addr
 
         server.get_request = get_request
