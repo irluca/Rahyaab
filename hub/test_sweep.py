@@ -205,6 +205,22 @@ def test_select_dial_hosts_falls_back_to_hub_inners():
         "10.12.13.1", "10.12.13.2", "wizard")
 
 
+def test_select_dial_hosts_overlay_live_dials_public():
+    run_sweep = _load_runner()
+    hub_pair = {"inner_iran": "10.10.13.1", "inner_foreign": "10.10.13.2"}
+    # Bug 14 (2026-11-01): pair 4's live protocol is an overlay
+    # (backhaul-wss) and it never had a carrier, so no store holds a
+    # carrier declaration and the hub inners have no interface behind
+    # them. Falling back to them made every overlay bench fail at the
+    # readiness check, including the live backhaul bench itself.
+    assert run_sweep.select_dial_hosts(
+        hub_pair, {"underlay_carrier": "", "iran_dial_host": "",
+                   "foreign_dial_host": "", "active_tunnel": "backhaul-wss"},
+        None) == (None, None, "public")
+    assert run_sweep.select_dial_hosts(hub_pair, None, None) == (
+        "10.10.13.1", "10.10.13.2", "hub")
+
+
 def test_read_declaration_rows_reads_both_stores(tmp_path):
     run_sweep = _load_runner()
     healer_db = tmp_path / "healer.db"

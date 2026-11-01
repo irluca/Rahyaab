@@ -204,6 +204,16 @@ def select_dial_hosts(hub_pair, healer_row, wizard_row):
     carrier used 10.12.13.x, and no store held a declaration at all (the
     wizard path never created the pair row), so every overlay bench
     dialed a dead /30 and failed identically.
+    Bug 14 (2026-11-01): pair 4's live protocol is an overlay
+    (backhaul-wss) and it never had a carrier, so no store holds a
+    carrier declaration and the hub inners (10.10.13.x) have no
+    interface behind them. Falling back to them made every overlay
+    bench fail identically at the 25 s readiness check — including the
+    live backhaul bench itself, which is proven working. With no
+    carrier declaration and an overlay live tunnel, there is no
+    carrier underlay to dial, so the benches dial the public host
+    exactly like the wizard's overlay measure does (dial_host unset
+    makes peer_address fall back to host).
     """
     live = str((healer_row or {}).get("active_tunnel") or "").strip().lower()
     if live:
@@ -214,6 +224,8 @@ def select_dial_hosts(hub_pair, healer_row, wizard_row):
     for row, src in ((wizard_row, "wizard"), (healer_row, "healer")):
         if _complete_declaration(row):
             return row["iran_dial_host"], row["foreign_dial_host"], src
+    if live and live not in ("gre", "esp"):
+        return None, None, "public"
     return hub_pair.get("inner_iran"), hub_pair.get("inner_foreign"), "hub"
 
 
@@ -277,7 +289,16 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
     _healer_row, _wizard_row = read_declaration_rows(pair_id, healer_db)
     _iran_dh, _foreign_dh, _src = select_dial_hosts(
         pair, _healer_row, _wizard_row)
-    if (_iran_dh, _foreign_dh) != (pair["inner_iran"], pair["inner_foreign"]):
+    if _src == "public":
+        # Bug 14: no carrier declaration and the live tunnel is an
+        # overlay, so there is no carrier underlay to dial. Unset the
+        # dial hosts so overlay benches dial the public host, exactly
+        # like the wizard's overlay measure.
+        log("dial hosts: public (live protocol is an overlay; "
+            "no carrier underlay to dial)")
+        engine_pair["iran"]["dial_host"] = None
+        engine_pair["foreign"]["dial_host"] = None
+    elif (_iran_dh, _foreign_dh) != (pair["inner_iran"], pair["inner_foreign"]):
         log("dial hosts overridden by live carrier declaration (%s)" % _src)
         engine_pair["iran"]["dial_host"] = _iran_dh
         engine_pair["foreign"]["dial_host"] = _foreign_dh
