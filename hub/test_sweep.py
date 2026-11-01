@@ -170,34 +170,70 @@ def test_worker_enqueues_sweep_after_full_setup(tmp_path, monkeypatch):
                for t, _p, s in _jobs(store))
 
 
-def test_resolve_dial_hosts_prefers_live_carrier_declaration():
+def test_select_dial_hosts_prefers_live_carrier_match():
     run_sweep = _load_runner()
     hub_pair = {"inner_iran": "10.10.12.1", "inner_foreign": "10.10.12.2"}
-    decl = {"underlay_carrier": "esp", "iran_dial_host": "10.12.13.1",
-            "foreign_dial_host": "10.12.13.2"}
-    assert run_sweep.resolve_dial_hosts(hub_pair, decl) == (
-        "10.12.13.1", "10.12.13.2")
-    decl_gre = {"underlay_carrier": "GRE", "iran_dial_host": "10.10.11.1",
-                "foreign_dial_host": "10.10.11.2"}
-    assert run_sweep.resolve_dial_hosts(hub_pair, decl_gre) == (
-        "10.10.11.1", "10.10.11.2")
+    healer = {"underlay_carrier": "gre", "iran_dial_host": "10.10.12.1",
+              "foreign_dial_host": "10.10.12.2", "active_tunnel": "ESP"}
+    wizard = {"underlay_carrier": "esp", "iran_dial_host": "10.12.13.1",
+              "foreign_dial_host": "10.12.13.2"}
+    assert run_sweep.select_dial_hosts(hub_pair, healer, wizard) == (
+        "10.12.13.1", "10.12.13.2", "wizard")
+    healer_live = {"underlay_carrier": "gre", "iran_dial_host": "10.10.11.1",
+                   "foreign_dial_host": "10.10.11.2", "active_tunnel": "GRE"}
+    assert run_sweep.select_dial_hosts(hub_pair, healer_live, wizard) == (
+        "10.10.11.1", "10.10.11.2", "healer")
 
 
-def test_resolve_dial_hosts_falls_back_to_hub_inners():
+def test_select_dial_hosts_falls_back_to_hub_inners():
     run_sweep = _load_runner()
     hub_pair = {"inner_iran": "10.10.12.1", "inner_foreign": "10.10.12.2"}
-    assert run_sweep.resolve_dial_hosts(hub_pair, None) == (
-        "10.10.12.1", "10.10.12.2")
-    assert run_sweep.resolve_dial_hosts(
+    assert run_sweep.select_dial_hosts(hub_pair, None, None) == (
+        "10.10.12.1", "10.10.12.2", "hub")
+    assert run_sweep.select_dial_hosts(
         hub_pair, {"underlay_carrier": "", "iran_dial_host": "10.12.13.1",
-                   "foreign_dial_host": "10.12.13.2"}) == (
-        "10.10.12.1", "10.10.12.2")
-    assert run_sweep.resolve_dial_hosts(
+                   "foreign_dial_host": "10.12.13.2", "active_tunnel": "ESP"},
+        None) == ("10.10.12.1", "10.10.12.2", "hub")
+    assert run_sweep.select_dial_hosts(
         hub_pair, {"underlay_carrier": "esp", "iran_dial_host": "",
-                   "foreign_dial_host": "10.12.13.2"}) == (
-        "10.10.12.1", "10.10.12.2")
-    assert run_sweep.resolve_dial_hosts(
-        hub_pair, {"underlay_carrier": "public",
-                   "iran_dial_host": "10.12.13.1",
-                   "foreign_dial_host": "10.12.13.2"}) == (
-        "10.10.12.1", "10.10.12.2")
+                   "foreign_dial_host": "10.12.13.2", "active_tunnel": "ESP"},
+        None) == ("10.10.12.1", "10.10.12.2", "hub")
+    assert run_sweep.select_dial_hosts(
+        hub_pair, None,
+        {"underlay_carrier": "esp", "iran_dial_host": "10.12.13.1",
+         "foreign_dial_host": "10.12.13.2"}) == (
+        "10.12.13.1", "10.12.13.2", "wizard")
+
+
+def test_read_declaration_rows_reads_both_stores(tmp_path):
+    run_sweep = _load_runner()
+    healer_db = tmp_path / "healer.db"
+    conn = sqlite3.connect(healer_db)
+    conn.execute("CREATE TABLE pairs (id INTEGER PRIMARY KEY,"
+                 " underlay_carrier TEXT, iran_dial_host TEXT,"
+                 " foreign_dial_host TEXT, active_tunnel TEXT)")
+    conn.execute("INSERT INTO pairs VALUES (3, '', '', '', 'ESP')")
+    conn.commit()
+    conn.close()
+    wizard_db = tmp_path / "wizard.db"
+    conn = sqlite3.connect(wizard_db)
+    conn.execute("CREATE TABLE pairs (id INTEGER PRIMARY KEY,"
+                 " underlay_carrier TEXT, iran_dial_host TEXT,"
+                 " foreign_dial_host TEXT)")
+    conn.execute("INSERT INTO pairs VALUES (3, 'esp', '10.12.13.1', '10.12.13.2')")
+    conn.commit()
+    conn.close()
+    run_sweep.WIZARD_DB_PATH = str(wizard_db)
+    healer_row, wizard_row = run_sweep.read_declaration_rows(3, str(healer_db))
+    assert healer_row["active_tunnel"] == "ESP"
+    assert wizard_row["underlay_carrier"] == "esp"
+    assert run_sweep.select_dial_hosts(
+        {"inner_iran": "10.10.12.1", "inner_foreign": "10.10.12.2"},
+        healer_row, wizard_row) == ("10.12.13.1", "10.12.13.2", "wizard")
+    missing_healer, missing_wizard = run_sweep.read_declaration_rows(
+        3, str(tmp_path / "nope.db"))
+    assert missing_healer is None
+    run_sweep.WIZARD_DB_PATH = str(tmp_path / "nope-wizard.db")
+    _h, missing_wizard = run_sweep.read_declaration_rows(
+        3, str(tmp_path / "nope.db"))
+    assert missing_wizard is None

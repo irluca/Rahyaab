@@ -8136,6 +8136,28 @@ dM/5IlBnpCMejDaKAYLbcLo=
                             f"{fname}:{ln} builds an operational pair dict without declaring "
                             f"underlay_carrier, so the gate would infer 'gre' for it")
 
+    def test_68b_ensure_pair_row_lets_a_wizard_deploy_declare_its_carrier(self):
+        """Bug 12: the wizard path never created the pair row, so every
+        deploy's declaration was silently dropped (declaring on a pair
+        that does not exist is not a success by design) and overlay
+        benches dialed the hub row's creation-time inners."""
+        existing = storage.get_pairs()
+        pid = max([p["id"] for p in existing], default=0) + 1000
+        self.assertIsNone(storage.get_pair(pid))
+        self.assertFalse(storage.set_pair_underlay(pid, "esp"),
+                         "the row is missing, so the declaration must not land")
+        self.assertTrue(storage.ensure_pair_row(
+            pid, "bug12-pair", "203.0.113.1", "203.0.113.2", 2083))
+        self.assertTrue(storage.ensure_pair_row(
+            pid, "bug12-pair", "203.0.113.1", "203.0.113.2", 2083),
+            "ensuring twice must not fail on the existing row")
+        self.assertTrue(storage.set_pair_underlay(
+            pid, "esp", "10.12.13.1", "10.12.13.2"))
+        row = storage.get_pair(pid)
+        self.assertEqual((row["underlay_carrier"], row["iran_dial_host"],
+                          row["foreign_dial_host"]),
+                         ("esp", "10.12.13.1", "10.12.13.2"))
+
     def test_69_a_second_carrier_on_an_occupied_frontend_refuses_before_it_stages_anything(self):
         """#40 Acceptance Test: a carrier's frontend is the rule that answers it first, not the rule added last.
 

@@ -601,6 +601,46 @@ def add_pair(name: str, iran_host: str, foreign_host: str, frontend_port: int = 
     log_audit(pair_id, "ADD_PAIR", "SUCCESS", f"Added pair {name} ({iran_host} -> {foreign_host} :{frontend_port})")
     return pair_id
 
+def ensure_pair_row(pair_id: int, name: str, iran_host: str, foreign_host: str,
+                    frontend_port: int = 443, iran_port: int = 22,
+                    foreign_port: int = 22) -> bool:
+    """Create the pair row with this exact id when it is missing.
+
+    The carrier declaration (set_pair_underlay) is UPDATE-only by design:
+    declaring on a pair that does not exist is not a success, and a test
+    enshrines that. But no caller in the wizard path ever created the row,
+    so every wizard deploy's declaration was silently dropped (bug 12,
+    2026-11-01: pair 3's ESP declaration never persisted anywhere, and
+    every overlay bench then dialed the hub row's creation-time inners).
+    Returns True when the row exists afterwards (created or already there).
+    A name clash with a different id falls back to a suffixed name so the
+    row — and therefore the declaration — is never blocked by it.
+    """
+    now = time.time()
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM pairs WHERE id = ?", (pair_id,))
+        if cur.fetchone() is not None:
+            return True
+        try:
+            cur.execute("""
+                INSERT INTO pairs (id, name, iran_host, iran_port, foreign_host,
+                                   foreign_port, frontend_port, status,
+                                   active_tunnel, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW', '', ?, ?)
+            """, (pair_id, name, iran_host, iran_port, foreign_host, foreign_port,
+                  frontend_port, now, now))
+        except sqlite3.IntegrityError:
+            cur.execute("""
+                INSERT INTO pairs (id, name, iran_host, iran_port, foreign_host,
+                                   foreign_port, frontend_port, status,
+                                   active_tunnel, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW', '', ?, ?)
+            """, (pair_id, "%s#%d" % (name, pair_id), iran_host, iran_port,
+                  foreign_host, foreign_port, frontend_port, now, now))
+    return True
+
+
 def set_pair_dial_hosts(pair_id: int, iran_dial_host: str = "", foreign_dial_host: str = "") -> bool:
     """Records the underlay address each side's tunnels dial, separately from the SSH address.
 

@@ -147,7 +147,7 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
               frontend_port: int = 443, protocol: str = DEFAULT_PROTOCOL,
               known_hosts_path: str = "/root/.ssh/known_hosts",
               pin_fn=None, measure_fn=None, deploy_fn=None,
-              install_fn=None, record_fn=None) -> dict:
+              install_fn=None, record_fn=None, ensure_fn=None) -> dict:
     """Measure, deploy, install the healer, record. Returns a summary.
 
     The *_fn arguments default to the real implementations; tests
@@ -159,6 +159,9 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
     if pin_fn is None:
         import storage
         pin_fn = storage.pin_host_key
+    if ensure_fn is None:
+        import storage
+        ensure_fn = storage.ensure_pair_row
     measure_fn = measure_fn or measure_single_protocol
     deploy_fn = deploy_fn or deploy_first_tunnel
     install_fn = install_fn or install_healer_wizard.wizard_install
@@ -174,6 +177,11 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
     if not score > 0:
         raise RuntimeError(
             f"Protocol {protocol} measured a non-positive score; refusing to continue")
+    # The deploy's carrier declaration is UPDATE-only by design, so the
+    # pair row must exist before deploy runs — no wizard caller ever
+    # created it, and every deploy's declaration was silently dropped
+    # (bug 12, 2026-11-01). Ensuring it here costs nothing on re-runs.
+    ensure_fn(pair_id, pair_name, iran_host, foreign_host, frontend_port)
     deploy = deploy_fn(pair, protocol)
     install = install_fn(iran_host, foreign_host, pair_id, pair_name,
                          frontend_port, protocol, {protocol: score},
