@@ -135,7 +135,10 @@ def db_session():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA busy_timeout = 60000;")  # 2026-11-01: the sweep
+    # shares the live healer's DB file, and 5 s was too short when the
+    # healer holds the lock — the sweep's engine thread died on
+    # "database is locked" at kcptun (pair 3), losing only that result.
     conn.execute("PRAGMA foreign_keys = ON;")
     try:
         yield conn
