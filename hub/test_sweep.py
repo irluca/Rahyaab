@@ -168,3 +168,36 @@ def test_worker_enqueues_sweep_after_full_setup(tmp_path, monkeypatch):
         worker.join(timeout=5)
     assert any(t == "full_setup" and s == "done"
                for t, _p, s in _jobs(store))
+
+
+def test_resolve_dial_hosts_prefers_live_carrier_declaration():
+    run_sweep = _load_runner()
+    hub_pair = {"inner_iran": "10.10.12.1", "inner_foreign": "10.10.12.2"}
+    decl = {"underlay_carrier": "esp", "iran_dial_host": "10.12.13.1",
+            "foreign_dial_host": "10.12.13.2"}
+    assert run_sweep.resolve_dial_hosts(hub_pair, decl) == (
+        "10.12.13.1", "10.12.13.2")
+    decl_gre = {"underlay_carrier": "GRE", "iran_dial_host": "10.10.11.1",
+                "foreign_dial_host": "10.10.11.2"}
+    assert run_sweep.resolve_dial_hosts(hub_pair, decl_gre) == (
+        "10.10.11.1", "10.10.11.2")
+
+
+def test_resolve_dial_hosts_falls_back_to_hub_inners():
+    run_sweep = _load_runner()
+    hub_pair = {"inner_iran": "10.10.12.1", "inner_foreign": "10.10.12.2"}
+    assert run_sweep.resolve_dial_hosts(hub_pair, None) == (
+        "10.10.12.1", "10.10.12.2")
+    assert run_sweep.resolve_dial_hosts(
+        hub_pair, {"underlay_carrier": "", "iran_dial_host": "10.12.13.1",
+                   "foreign_dial_host": "10.12.13.2"}) == (
+        "10.10.12.1", "10.10.12.2")
+    assert run_sweep.resolve_dial_hosts(
+        hub_pair, {"underlay_carrier": "esp", "iran_dial_host": "",
+                   "foreign_dial_host": "10.12.13.2"}) == (
+        "10.10.12.1", "10.10.12.2")
+    assert run_sweep.resolve_dial_hosts(
+        hub_pair, {"underlay_carrier": "public",
+                   "iran_dial_host": "10.12.13.1",
+                   "foreign_dial_host": "10.12.13.2"}) == (
+        "10.10.12.1", "10.10.12.2")

@@ -151,6 +151,30 @@ def cleanup_bench(iran_host: str, foreign_host: str, log) -> None:
         log("bench cleanup: foreign host failed: %s" % exc)
 
 
+def resolve_dial_hosts(hub_pair, engine_pair_row):
+    """Dial hosts for overlay benches: the live carrier's addresses when
+    the engine store declares one, else the hub row's inners.
+
+    The hub row's inners are creation-time values and are never updated
+    when the carrier changes, so a pair whose carrier moved (pair 3 on
+    2026-11-01: hub inners 10.10.12.x, live ESP carrier on 10.12.13.x)
+    would otherwise bench every overlay against a dead /30 and fail them
+    all identically — a verdict on the topology, not on the transports.
+    The engine store's declaration (written by engine.declare_carrier on
+    deploy success, cleared by retract_carrier on teardown) is the live
+    truth; when it names a carrier with both dial hosts, it wins. Any
+    other shape (no row, no carrier, a missing dial host) keeps the hub
+    inners, so pairs without a declaration behave exactly as today.
+    """
+    if engine_pair_row:
+        carrier = str(engine_pair_row.get("underlay_carrier") or "").strip().lower()
+        iran_dh = engine_pair_row.get("iran_dial_host") or ""
+        foreign_dh = engine_pair_row.get("foreign_dial_host") or ""
+        if carrier in ("gre", "esp") and iran_dh and foreign_dh:
+            return iran_dh, foreign_dh
+    return hub_pair.get("inner_iran"), hub_pair.get("inner_foreign")
+
+
 def run_sweep(pair_id: int, hub_db: str, log) -> dict:
     """Run the ladder in a thread, apply scores progressively, then
     finalize. Returns a summary dict."""
@@ -199,6 +223,25 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
     # be set before the import — exactly like a hand-run sweep script.
     os.environ["BEST_TUNNEL_DB_PATH"] = healer_db
     import engine
+    import storage
+
+    # Dial hosts must be the LIVE carrier's addresses, not the hub row's
+    # creation-time inners (bug 12, 2026-11-01: pair 3's hub inners were
+    # 10.10.12.x while its live ESP carrier used 10.12.13.x, so every
+    # overlay bench dialed a dead /30 and failed identically). The engine
+    # store's declaration is read here — after the env var points storage
+    # at the healer DB — and only a complete declaration overrides; anything
+    # else keeps the hub inners, so pairs without one are untouched.
+    try:
+        _decl = storage.get_pair(pair_id)
+    except Exception as exc:
+        log("live-carrier dial lookup failed, keeping hub inners: %s" % exc)
+        _decl = None
+    _iran_dh, _foreign_dh = resolve_dial_hosts(pair, _decl)
+    if (_iran_dh, _foreign_dh) != (pair["inner_iran"], pair["inner_foreign"]):
+        log("dial hosts overridden by live carrier declaration")
+        engine_pair["iran"]["dial_host"] = _iran_dh
+        engine_pair["foreign"]["dial_host"] = _foreign_dh
 
     errors = []
 
