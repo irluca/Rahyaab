@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -128,7 +130,20 @@ class Store:
                 conn.execute("ALTER TABLE pairs ADD COLUMN "
                              "spoof_status TEXT NOT NULL DEFAULT 'unknown'")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """One connection per operation, always closed on exit.
+
+        The old version returned a bare connection and every caller used
+        `with conn:` — but sqlite3's `__exit__` only commits or rolls
+        back; it never closes. A fraction of those connections landed in
+        reference cycles, so only the cyclic GC reclaimed them, and under
+        dashboard polling the leak outran collection: the hub hit its
+        1024-fd soft limit, accept() failed with EMFILE, the serve loop
+        spun, and the panel wedged (bug 13, 2026-11-01). This wrapper
+        keeps the old commit-on-success / rollback-on-error semantics
+        and adds the close that was missing.
+        """
         conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -136,7 +151,14 @@ class Store:
         # dashboard deletes a pair; without a busy timeout that delete
         # fails instead of waiting a moment (seen 2026-11-01).
         conn.execute("PRAGMA busy_timeout = 60000")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     # -- users / sessions -------------------------------------------------
     def user_count(self) -> int:
