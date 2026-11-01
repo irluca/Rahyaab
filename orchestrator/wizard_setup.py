@@ -9,16 +9,18 @@ is a different store, so before any sweep or deploy connection this
 module seeds it from known_hosts — a first connection that presents a
 different key is then REJECTED, never blindly pinned.
 
-Measurement is honest or it refuses: one protocol (default GRE, the
-carrier that has measured best on this route) is measured with the
-engine's own single-benchmark path (temporary test tunnel on ports
-8897/8898, never the production frontend), and a disqualified or
-zero-score row aborts the setup instead of inventing a score. The
-first production tunnel is then deployed with the engine's
-deploy_tunnel (verified + rollback), and only then is the healer
-installed on top of it — the monitor never has to conjure a tunnel
-from nothing, because a pair with no deployed tunnel produces no
-sample and the monitor does not act on it.
+Measurement is honest or it refuses: candidates are tried in order
+(first the requested protocol, default GRE, then the fallback order)
+with the engine's own single-benchmark path (temporary test tunnel on
+ports 8897/8898, never the production frontend), and the first
+protocol with a positive score is deployed. A disqualified or
+zero-score row only rejects that candidate; only when every
+candidate fails does the setup abort, with every candidate's reason
+in the error. The first production tunnel is then deployed with the
+engine's deploy_tunnel (verified + rollback), and only then is the
+healer installed on top of it — the monitor never has to conjure a
+tunnel from nothing, because a pair with no deployed tunnel produces
+no sample and the monitor does not act on it.
 
 The engine evidence database lives outside the repository
 (/var/lib/rahyaab/wizard.db); a live run refuses to start while its
@@ -34,6 +36,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_PROTOCOL = "GRE"
+
+# First-tunnel fallback order (bug 15, 2026-11-01): a new node used to
+# end up connected to NOTHING when its first protocol (GRE) failed —
+# the setup job failed and a human had to requeue ESP, then an
+# overlay, by hand (pair 4, jobs 19/20/21). The wizard now tries
+# candidates in order and deploys the first one that measures clean,
+# exactly that manual chain, on its own. Carriers first (best when
+# they work), then the TCP overlays by robustness, UDP last (UDP may
+# be filtered where TCP passes). singbox-vless-reality is NOT in the
+# chain: the carrier gate refuses it on GRE pairs and it needs its
+# own evaluation; the sweep still ranks it afterwards. Spoof and Bale
+# are excluded for the same reason as everywhere else (probe-gated
+# and parked).
+FALLBACK_ORDER = ["GRE", "ESP", "backhaul-wss", "rathole-noise",
+                  "frp-TLS", "chisel-wss", "xray-reverse", "wstunnel-v10",
+                  "singbox-ss-2022", "kcptun", "hysteria2"]
 
 
 def parse_known_hosts(path: str) -> dict:
@@ -127,7 +145,43 @@ def measure_single_protocol(pair: dict, protocol: str) -> dict:
     return row
 
 
-def deploy_first_tunnel(pair: dict, protocol: str) -> dict:
+def measure_first_working_protocol(pair: dict, protocol: str,
+                                   measure_fn) -> tuple:
+    """Try candidates in order; return (protocol, row, tried, errors).
+
+    The first candidate is the requested protocol, then FALLBACK_ORDER
+    (deduped). A candidate fails as a *verdict* when measuring raises
+    the "did not measure cleanly" RuntimeError or returns a
+    non-positive score — the bench ran and the protocol failed, so the
+    chain continues. Any other exception (SSH/connectivity, teardown)
+    is infrastructure, not a protocol verdict: it would fail every
+    candidate the same way, so it aborts immediately instead of
+    burning one measure per candidate. When every candidate fails as
+    a verdict, raises a RuntimeError listing every candidate and its
+    reason, so the job error is a full diagnosis, not one protocol.
+    """
+    candidates = []
+    for cand in [protocol] + FALLBACK_ORDER:
+        if cand not in candidates:
+            candidates.append(cand)
+    tried = []
+    errors = {}
+    for cand in candidates:
+        tried.append(cand)
+        try:
+            row = measure_fn(pair, cand)
+        except RuntimeError as exc:
+            if "did not measure cleanly" in str(exc):
+                errors[cand] = str(exc)
+                continue
+            raise
+        score = float(row.get("score") or 0)
+        if score > 0:
+            return cand, row, tried, errors
+        errors[cand] = "non-positive score %s" % row.get("score")
+    detail = "; ".join("%s: %s" % (c, errors[c]) for c in candidates)
+    raise RuntimeError(
+        "No protocol measured cleanly for this pair: %s" % detail)
     """Real production deploy; raises on failure, returns status dict."""
     import engine
     result = engine.deploy_tunnel(pair, protocol, dry_run=False)
@@ -172,11 +226,13 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
                             pin_fn=pin_fn)
     pair = pair_spec(iran_host, foreign_host, hub_key_path, pair_id,
                      frontend_port)
-    row = measure_fn(pair, protocol)
+    # Bug 15: try candidates in order and deploy the first one that
+    # measures clean, instead of failing the whole setup on the first
+    # protocol. A pair that ends up connected to nothing is the
+    # failure this exists to prevent.
+    protocol, row, tried, _errors = measure_first_working_protocol(
+        pair, protocol, measure_fn)
     score = float(row["score"])
-    if not score > 0:
-        raise RuntimeError(
-            f"Protocol {protocol} measured a non-positive score; refusing to continue")
     # The deploy's carrier declaration is UPDATE-only by design, so the
     # pair row must exist before deploy runs — no wizard caller ever
     # created it, and every deploy's declaration was silently dropped
@@ -190,6 +246,7 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
     return {
         "protocol": protocol,
         "score": score,
+        "tried": tried,
         "base_rtt_ms": row.get("base_rtt_ms"),
         "seeded_host_pins": seeded,
         "deploy_status": deploy.get("status"),
