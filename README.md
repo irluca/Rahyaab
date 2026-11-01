@@ -29,12 +29,16 @@ One rule above all: it only builds, monitors, and restores the tunnel. It never 
 
 You need two fresh Debian/Ubuntu servers and root on both.
 
-**1. Master.** Download the installer, run it, and pick Master setup:
+**1. Master.** Two commands, in order. The first only downloads the installer and prints nothing — that is normal. The second is what opens the menu:
 
 ```bash
+# 1. Download the installer (prints nothing — that is normal)
 curl -fsSL -o /tmp/install-rahyaab.sh https://raw.githubusercontent.com/irluca/Rahyaab/main/install.sh
+# 2. Run it — this opens the menu
 bash /tmp/install-rahyaab.sh
 ```
+
+Pick Master setup in the menu.
 
 It installs the hub, enables BBR, asks for a domain or IP certificate, registers itself, and prints a one-line join command.
 
