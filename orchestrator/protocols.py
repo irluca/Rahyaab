@@ -1463,6 +1463,27 @@ IDLE_TIMEOUT_SEC = 35.0
 CHUNK = 16384
 
 
+def make_listener(addr):
+    """One listener for `addr` (host, port), dual-stack when the host
+    is IPv6: an AF_INET6 socket with IPV6_V6ONLY cleared accepts both
+    IPv6 and IPv4-mapped connections, so a server bound to :: serves
+    the old IPv4 clients unchanged as well as the new IPv6 ones. An
+    IPv4 host keeps the exact socket shape it always had."""
+    host, port = addr
+    if ":" in host:
+        srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except (AttributeError, OSError):
+            pass
+    else:
+        srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(addr)
+    srv.listen(128)
+    return srv
+
+
 def frame_bytes(conn_id, ftype, payload):
     body = FRAME_HDR.pack(conn_id, ftype) + payload
     return TLS_HDR.pack(0x17, 0x03, 0x03, len(body)) + body
@@ -1576,10 +1597,7 @@ def serve(lanes_addr, frontend_addr, token, ready=None, stop=None):
         close_lane(lane_id)
 
     def lane_acceptor():
-        srv = socket.socket()
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(lanes_addr)
-        srv.listen(64)
+        srv = make_listener(lanes_addr)
         srv.settimeout(1.0)
         if ready is not None:
             ready["lanes"] = srv.getsockname()
@@ -1640,10 +1658,7 @@ def serve(lanes_addr, frontend_addr, token, ready=None, stop=None):
             lane.conns.discard(conn_id)
 
     def frontend_acceptor():
-        srv = socket.socket()
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(frontend_addr)
-        srv.listen(128)
+        srv = make_listener(frontend_addr)
         srv.settimeout(1.0)
         if ready is not None:
             ready["frontend"] = srv.getsockname()
@@ -1808,6 +1823,13 @@ def main():
     args = ap.parse_args()
 
     def _addr(text):
+        # Bracketed IPv6 first: "[2a03:9381:b::62]:29001" must not be
+        # split on an inner colon. Bare "host:port" keeps the old path.
+        if text.startswith("["):
+            host, _, port = text[1:].partition("]:")
+            if not port:
+                raise ValueError("bad bracketed address: %r" % text)
+            return host, int(port)
         host, port = text.rsplit(":", 1)
         return host, int(port)
 
@@ -1827,7 +1849,8 @@ if __name__ == "__main__":
 
 def generate_tcp_lanes(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
                        transport_port: int = None, namespace: str = "prod",
-                       backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+                       backend_port: int = None, tag: str = "", base: int = 10,
+                       iran_v6: str = None) -> dict:
     """Parallel-TCP reverse carrier, from C-Tunnel's revcarrier idea,
     implemented here in stdlib Python: 8 TCP streams in TLS-record
     shapes between a server on Iran and a client on the foreign host,
@@ -1840,7 +1863,19 @@ def generate_tcp_lanes(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
     benches pass the shared bench transport port explicitly, as usual.
     Like the other overlays it adds no iptables rules: the server
     process itself binds the frontend (reverse forward) and the lanes
-    port, exactly as chisel's server does."""
+    port, exactly as chisel's server does.
+
+    `iran_v6` switches the dial direction to IPv6 without touching
+    anything else: the server binds [::] (dual-stack, so IPv4 clients
+    keep working through mapped addresses) and the foreign client
+    dials [iran_v6]:transport. The backend delivery stays 127.0.0.1,
+    and the inner path stays IPv4: only the outer transport moves to
+    IPv6. This is the reverse-mode shape the live probe proved viable
+    on 2026-11-02 (foreign->Iran IPv6 passes, Iran->foreign does not),
+    because the connection is initiated by the foreign side."""
+    import ipaddress
+    if iran_v6 is not None:
+        ipaddress.IPv6Address(iran_v6)  # ValueError on garbage: fail closed
     ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     transport = int(transport_port) if transport_port else 29000 + (pair_id % 1000)
@@ -1850,6 +1885,14 @@ def generate_tcp_lanes(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
     script_path = f"/usr/local/bin/best-tunnel-tcp-lanes-{ptok}-{namespace}.py"
     token_path = f"/etc/best-tunnel/tcp-lanes/{namespace}-token-{ptok}"
     env_path = f"/etc/best-tunnel/tcp-lanes/{namespace}-env-{ptok}"
+    if iran_v6 is not None:
+        listen = f"[::]:{transport}"
+        front = f"[::]:{frontend}"
+        remote = f"[{iran_v6}]:{transport}"
+    else:
+        listen = f"0.0.0.0:{transport}"
+        front = f"0.0.0.0:{frontend}"
+        remote = f"{ir_ip}:{transport}"
     ir_unit = f"""[Unit]
 Description=Best Tunnel TCP Lanes Server ({namespace.title()} Pair {pair_id})
 After=network-online.target
@@ -1858,7 +1901,7 @@ Type=simple
 User=root
 Restart=always
 RestartSec=5
-ExecStart=/usr/bin/python3 {script_path} --mode server --listen 0.0.0.0:{transport} --frontend 0.0.0.0:{frontend} --token-file {token_path}
+ExecStart=/usr/bin/python3 {script_path} --mode server --listen {listen} --frontend {front} --token-file {token_path}
 [Install]
 WantedBy=multi-user.target
 """
@@ -1871,7 +1914,7 @@ User=root
 Restart=always
 RestartSec=5
 EnvironmentFile={env_path}
-ExecStart=/usr/bin/python3 {script_path} --mode client --remote {ir_ip}:{transport} --backend 127.0.0.1:{backend} --streams 8
+ExecStart=/usr/bin/python3 {script_path} --mode client --remote {remote} --backend 127.0.0.1:{backend} --streams 8
 [Install]
 WantedBy=multi-user.target
 """
@@ -1898,6 +1941,32 @@ WantedBy=multi-user.target
                              f"systemctl disable {svc_fr} 2>/dev/null || true",
                              f"rm -f /etc/systemd/system/{svc_fr}.service {env_path} {script_path}"],
     }
+
+
+def generate_tcp_lanes_v6(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
+                          transport_port: int = None, namespace: str = "prod",
+                          backend_port: int = None, tag: str = "", base: int = 10,
+                          iran_v6: str = None) -> dict:
+    """The IPv6 reverse variant of tcp-lanes, as its own protocol name
+    so scores, switches and the healer can tell it apart from the
+    IPv4 tcp-lanes: a switch to tcp-lanes-v6 must never silently
+    regenerate as IPv4 tcp-lanes on a later redeploy.
+
+    Gated, not listed: it is deliberately absent from BASE_PROTOCOLS
+    and FALLBACK_ORDER, so the wizard never tries it blind and the
+    sweep benches it only when the pair's IPv6 probe says the reverse
+    direction passes (BEST_TUNNEL_IPV6_REVERSE). Deploying it without
+    an Iran IPv6 address refuses here, before anything is written."""
+    if not iran_v6:
+        raise ValueError(
+            "tcp-lanes-v6 needs iran_v6: deploy it only for a pair whose "
+            "IPv6 probe passed the foreign->Iran direction")
+    plan = generate_tcp_lanes(pair_id, ir_ip, fr_ip, frontend,
+                              transport_port=transport_port, namespace=namespace,
+                              backend_port=backend_port, tag=tag, base=base,
+                              iran_v6=iran_v6)
+    plan["protocol"] = "tcp-lanes-v6"
+    return plan
 
 
 def _esp_spi(pair_id: int, namespace: str, direction: str) -> str:
@@ -4183,6 +4252,7 @@ GENERATORS = {
     "wireguard": generate_wireguard,
     "wireguard-fec": generate_wireguard_fec,
     "tcp-lanes": generate_tcp_lanes,
+    "tcp-lanes-v6": generate_tcp_lanes_v6,
     "backhaul-wss": generate_backhaul_wss,
     "rathole-noise": generate_rathole_noise,
     "chisel-wss": generate_chisel_wss,
@@ -4248,11 +4318,25 @@ def get_supported_protocols() -> list[str]:
     not pass on both sides must never see it as a candidate, so the
     sweep sets BEST_TUNNEL_SKIP_SPOOF=1 for such pairs and the ladder
     skips it entirely instead of benching a tunnel that cannot work.
+
+    tcp-lanes-v6 is gated the same way, but additive: it is absent by
+    default and appears only when the sweep sets BEST_TUNNEL_IPV6_REVERSE
+    to the pair's probed Iran IPv6 address (the reverse direction
+    passed). An unset or unparsable value means no v6 candidate at all,
+    never a v6 bench against a guessed address.
     """
     import os
     base = list(BASE_PROTOCOLS)
     if os.getenv("BEST_TUNNEL_SKIP_SPOOF", "0").strip().lower() in ("1", "true", "yes"):
         base = [p for p in base if p != "spoof-wireguard"]
+    v6 = (os.getenv("BEST_TUNNEL_IPV6_REVERSE") or "").strip()
+    if v6:
+        try:
+            import ipaddress
+            ipaddress.IPv6Address(v6)
+            base.append("tcp-lanes-v6")
+        except ValueError:
+            pass
     if is_singbox_enabled():
         return base + list(SINGBOX_PROTOCOLS)
     return base
@@ -4311,6 +4395,9 @@ DESTINATION_MECHANISM = {
     "tcp-lanes": "8 parallel TCP streams in TLS-record-shaped frames, client authenticated by a token "
                  "frame; the record shape is camouflage, not TLS, and a lane that fails "
                  "authentication is closed before it carries anything",
+    "tcp-lanes-v6": "same 8 TLS-record-shaped streams as tcp-lanes, but the foreign client dials Iran's "
+                    "global IPv6 address and the Iran server listens dual-stack; the record shape "
+                    "is camouflage, not TLS, exactly as in tcp-lanes",
     "kcptun": "shared-key KCP: the key encrypts the channel, it does not identify a destination",
     "xray-reverse": "vmess inter-connect with security=none: no TLS layer, no peer authentication",
     "singbox-ss-2022": "Shadowsocks-2022 pre-shared key: a key both sides hold, so no destination identity",
@@ -4462,6 +4549,8 @@ BACKEND_TARGETS = {
                       "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
     "tcp-lanes": ("foreign_files", r'--backend 127\.0\.0\.1:(?P<backend>\d+)',
                   "foreign", "lanes client delivers to loopback"),
+    "tcp-lanes-v6": ("foreign_files", r'--backend 127\.0\.0\.1:(?P<backend>\d+)',
+                     "foreign", "lanes client delivers to loopback (dial target is Iran IPv6)"),
 }
 
 # These two do not deliver to a local port at all: they are servers whose best outbound is `direct`, so the
@@ -4476,7 +4565,7 @@ BACKEND_EGRESS_PROXIES = ("singbox-vless-reality", "singbox-ss-2022")
 # firewall manifest *and* their mirrored deletes, which is its own change with its own hardware A/B.
 BACKEND_PORT_DECLARABLE = ("xray-reverse", "chisel-wss", "wstunnel-v10", "frp-TLS", "kcptun",
                            "rathole-noise", "backhaul-wss", "hysteria2", "bale-webrtc", "spoof-wireguard",
-                           "tcp-lanes")
+                           "tcp-lanes", "tcp-lanes-v6")
 
 
 def backend_target(protocol: str, plan: dict) -> dict:
@@ -4611,7 +4700,8 @@ def _validate_plan_configs(plan: dict, protocol: str, namespace: str) -> dict:
 
 
 def generate_deployment(protocol: str, pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
-                        backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+                        backend_port: int = None, tag: str = "", base: int = 10,
+                        iran_v6: str = None) -> dict:
     """Build the production plan for one transport, and name the port its traffic is delivered to.
 
     `backend_port` is the second end of the tunnel: the port on the peer host that must answer. Left unset
@@ -4620,6 +4710,11 @@ def generate_deployment(protocol: str, pair_id: int, ir_ip: str, fr_ip: str, fro
     before §8b. A value that the named transport cannot implement raises here rather than being dropped,
     because a silently-ignored declaration produces a tunnel that delivers to the frontend the operator
     just overrode.
+
+    `iran_v6` belongs only to the gated IPv6 variant: passing it for
+    any other protocol is a caller bug and raises, and deploying
+    tcp-lanes-v6 without it raises too, so a v6 plan can never be
+    built against a guessed or stale address by accident.
     """
     gen = GENERATORS.get(protocol)
     if not gen:
@@ -4630,11 +4725,17 @@ def generate_deployment(protocol: str, pair_id: int, ir_ip: str, fr_ip: str, fro
     kwargs = {"namespace": "prod", "tag": tag, "base": base}
     if protocol in BACKEND_PORT_DECLARABLE:
         kwargs["backend_port"] = backend_port
+    if protocol == "tcp-lanes-v6":
+        if not iran_v6:
+            raise ValueError("tcp-lanes-v6 needs iran_v6")
+        kwargs["iran_v6"] = iran_v6
+    elif iran_v6 is not None:
+        raise ValueError("iran_v6 applies only to tcp-lanes-v6, not %s" % protocol)
     return _validate_plan_configs(gen(pair_id, ir_ip, fr_ip, frontend, **kwargs), protocol, "prod")
 
 def generate_benchmark_plan(protocol: str, pair_id: int, ir_ip: str, fr_ip: str,
                             test_frontend: int = 8898, test_transport: int = 8897,
-                            tag: str = "", base: int = 10) -> dict:
+                            tag: str = "", base: int = 10, iran_v6: str = None) -> dict:
     """Generates an isolated, non-colliding test deployment specifically for running ladder benchmarks.
 
     No `backend_port` is threaded through on purpose: the benchmark starts its own HTTP backend on the peer
@@ -4642,14 +4743,30 @@ def generate_benchmark_plan(protocol: str, pair_id: int, ir_ip: str, fr_ip: str,
     be answered and is, by construction, the frontend. Making it configurable would let the sweep measure a
     tunnel whose backend it can no longer reach and score that as transport loss - the exact confusion §8b
     removes from the production path.
+
+    For tcp-lanes-v6 the bench address comes from `iran_v6`, falling
+    back to the sweep's BEST_TUNNEL_IPV6_REVERSE (set from the probe);
+    without either, benching the variant refuses rather than dialing
+    a guessed address. The sweep only ever lists the variant when the
+    env var is set, so a direct caller is the only path that can hit
+    this refusal.
     """
+    import os
     gen = GENERATORS.get(protocol)
     if not gen:
         raise ValueError(f"Unknown protocol for benchmark: {protocol}")
+    bench_kwargs = {}
+    if protocol == "tcp-lanes-v6":
+        addr = iran_v6 or (os.getenv("BEST_TUNNEL_IPV6_REVERSE") or "").strip() or None
+        if not addr:
+            raise ValueError("tcp-lanes-v6 bench needs iran_v6")
+        bench_kwargs["iran_v6"] = addr
+    elif iran_v6 is not None:
+        raise ValueError("iran_v6 applies only to tcp-lanes-v6, not %s" % protocol)
     if protocol == "GRE":
         plan = gen(pair_id, ir_ip, fr_ip, test_frontend, namespace="bench", tag=tag, base=base)
     else:
-        plan = gen(pair_id, ir_ip, fr_ip, test_frontend, transport_port=test_transport, namespace="bench", tag=tag, base=base)
+        plan = gen(pair_id, ir_ip, fr_ip, test_frontend, transport_port=test_transport, namespace="bench", tag=tag, base=base, **bench_kwargs)
 
     # Hardening: cap the lifetime of ephemeral benchmark units. `Type=oneshot` ignores RuntimeMaxSec
     # outright - both live hosts logged "RuntimeMaxSec= has no effect in combination with

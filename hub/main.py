@@ -71,6 +71,7 @@ def main(argv=None) -> int:
         try:
             from hub import jobs as _jobs
             _jobs.backfill_spoof_probes(store)
+            _jobs.backfill_ipv6_probes(store)
         except Exception:
             pass
         scheme = "https" if args.tls_cert else "http"

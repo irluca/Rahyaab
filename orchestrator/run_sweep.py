@@ -47,6 +47,20 @@ echo CLEAN-DONE
 """
 
 
+def ipv6_reverse_address(store, pair_id: int) -> str | None:
+    """Probed Iran IPv6 for the tcp-lanes-v6 bench gate, or None.
+
+    Only a probe that passed the reverse direction counts, and only
+    its first Iran address: a stale or unpassed address must never
+    reach a bench dial.
+    """
+    status = store.get_ipv6_status(pair_id) or {}
+    addrs = status.get("iran_v6") or []
+    if status.get("reverse_ready") and addrs:
+        return addrs[0]
+    return None
+
+
 def pidfile_dir() -> str:
     return os.environ.get("RAHYAAB_SWEEP_DIR", "/var/lib/rahyaab")
 
@@ -315,6 +329,16 @@ def run_sweep(pair_id: int, hub_db: str, log, quick: bool = False) -> dict:
         os.environ["BEST_TUNNEL_SKIP_SPOOF"] = "1"
     else:
         os.environ.pop("BEST_TUNNEL_SKIP_SPOOF", None)
+
+    # tcp-lanes-v6 is gated the same way, but additive: the ladder
+    # benches it only for pairs whose IPv6 probe passed the reverse
+    # direction, dialing the probed Iran address. Any other pair never
+    # sees the variant, so no bench ever dials a guessed address.
+    _iran_v6 = ipv6_reverse_address(store, pair_id)
+    if _iran_v6:
+        os.environ["BEST_TUNNEL_IPV6_REVERSE"] = _iran_v6
+    else:
+        os.environ.pop("BEST_TUNNEL_IPV6_REVERSE", None)
 
     # storage.DB_PATH is read at engine import time, so the env var must
     # be set before the import — exactly like a hand-run sweep script.

@@ -51,6 +51,7 @@ import time
 # the tests insert this directory on sys.path the same way.
 import protocols
 import storage
+import ipv6_readiness
 
 REQUEST_PATH = "/var/lib/best-tunnel/switch-request.json"
 RESULT_PATH = "/var/lib/best-tunnel/switch-result.json"
@@ -187,6 +188,20 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
             # This mirrors execute_failover's own plan_for exactly.
             # A port change plans with the NEW port: a plan that
             # cannot be built for it fails here, tunnel untouched.
+            # A v6 target reads this host's own address locally: the
+            # healer runs on Iran, so no SSH round-trip is needed, and
+            # a missing address fails here with the tunnel untouched
+            # instead of reaching execute_failover's guard.
+            iran_v6 = None
+            if target == "tcp-lanes-v6":
+                iran_v6 = ipv6_readiness.local_global_v6()
+                if iran_v6 is None:
+                    result.update(
+                        status="failed",
+                        detail="tcp-lanes-v6 needs an Iran global IPv6 "
+                               "address; none detected on this host")
+                    write_result(result_path, result)
+                    return result
             try:
                 protocols.generate_deployment(
                     target, pair["id"],
@@ -194,7 +209,8 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
                     protocols.dial_address(pair["foreign"], target),
                     int(new_port) if port_change else current_frontend,
                     backend_port=pair.get("backend_port") or None,
-                    tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
+                    tag=protocols.pair_tag(pair), base=protocols.pair_base(pair),
+                    iran_v6=iran_v6)
             except Exception as exc:
                 result.update(status="failed",
                               detail="cannot plan %s: %s" % (target, exc))

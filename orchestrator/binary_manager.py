@@ -429,6 +429,7 @@ PROTOCOL_BINARIES = {
     "wireguard": ("wireguard-tools",),
     "wireguard-fec": ("wireguard-tools",),
     "tcp-lanes": (),
+    "tcp-lanes-v6": (),
     "backhaul-wss": ("backhaul",),
     "rathole-noise": ("rathole",),
     "chisel-wss": ("chisel",),

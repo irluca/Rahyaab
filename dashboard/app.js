@@ -149,8 +149,29 @@ function renderPairs() {
     } else if (p.spoof_status === "open" && !(spoofScore > 0)) {
       spoofCard = `<span class="proto-chip pending"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">spoof-wireguard</span><span>🔗</span></span><span class="proto-score">اسپوف باز است؛ در انتظار بنچمارک</span></span>`;
     }
-    const scoreChips = (scoreCards.length || rejectedCards.length || spoofCard)
-      ? scoreCards.concat(rejectedCards).join("") + spoofCard
+    // IPv6 verdict card, mirroring the spoof card: the probe verdict is
+    // a pair property, not a score. Never probed shows a probe button
+    // (the probe is auto-enqueued after setup and on hub start, but
+    // the operator can always re-run it). Ready means the reverse
+    // direction passed, so the next sweep/quick test benches
+    // tcp-lanes-v6; not-ready names the concrete reason instead of a
+    // vague failure, and unknown stays honest about not knowing.
+    const v6 = p.ipv6_status;
+    let ipv6Card = "";
+    if (!v6) {
+      ipv6Card = `<span class="proto-chip pending"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">IPv6</span><span>🔗</span></span><span class="proto-score">بررسی نشده است</span><button type="button" class="ipv6probe-btn">بررسی IPv6</button></span>`;
+    } else if (v6.reverse_ready) {
+      ipv6Card = `<span class="proto-chip"><span class="proto-name"><span class="proto-dot pulse"></span><span class="ltr">IPv6</span><span>🔗</span></span><span class="proto-score">معکوس آماده است</span></span>`;
+    } else {
+      let reason = "معکوس آماده نیست";
+      const f2i = (v6.foreign_to_iran || {}).status;
+      if (!(v6.iran_v6 || []).length) reason = "سرور ایران IPv6 ندارد";
+      else if (f2i === "blocked") reason = "از خارج به ایران قطع است";
+      else if (f2i === "unknown") reason = "نتیجه نامشخص است";
+      ipv6Card = `<span class="proto-chip rejected"><span class="proto-name"><span class="proto-dot"></span><span class="ltr">IPv6</span><span>🔗</span></span><span class="proto-score">${reason}</span><button type="button" class="ipv6probe-btn">بررسی دوباره</button></span>`;
+    }
+    const scoreChips = (scoreCards.length || rejectedCards.length || spoofCard || ipv6Card)
+      ? scoreCards.concat(rejectedCards).join("") + spoofCard + ipv6Card
       : '<p class="muted small">امتیازی ثبت نشده است.</p>';
     const iran = state.servers.find(s => s.id === p.iran_server_id);
     const foreign = state.servers.find(s => s.id === p.foreign_server_id);
@@ -254,6 +275,13 @@ function renderPairs() {
       btn.onclick = async () => {
         await api("POST", "/api/jobs", { type: "spoof_probe", pair_id: +id });
         showBanner("بررسی اسپوف ساخته شد؛ چند ثانیه دیگر تازه‌سازی کنید.");
+        setTimeout(loadAll, 3000);
+      };
+    });
+    card.querySelectorAll("button.ipv6probe-btn").forEach(btn => {
+      btn.onclick = async () => {
+        await api("POST", "/api/jobs", { type: "ipv6_probe", pair_id: +id });
+        showBanner("بررسی IPv6 ساخته شد؛ چند ثانیه دیگر تازه‌سازی کنید.");
         setTimeout(loadAll, 3000);
       };
     });

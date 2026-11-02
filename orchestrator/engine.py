@@ -2387,7 +2387,8 @@ def data_probe_command(frontend: int) -> str:
 
 def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
                   force_confirmed: bool = False, override_active_users: bool = False,
-                  verification_timeout: float = 30.0, ir_runner=None, fr_runner=None) -> dict:
+                  verification_timeout: float = 30.0, ir_runner=None, fr_runner=None,
+                  iran_v6: str = None) -> dict:
     """Fully deploys a selected tunnel with server-side gating, data probe verification, and rollback."""
     pair_id = pair.get("id", 1)
     frontend = pair.get("frontend", 443)
@@ -2412,7 +2413,8 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
     # this protocol - so a gate that fires before anything is touched refuses without taking a live
     # tunnel down with it.
     plan = protocols.generate_deployment(choice, pair_id, ir_ip, fr_ip, frontend,
-                                         backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
+                                         backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair),
+                                         iran_v6=iran_v6)
     blocked_target = backend_target_block(choice, frontend, backend_port, plan)
     if blocked_target:
         # Same placement rule as the two gates below it: decide before the frontend is released, because a

@@ -14,7 +14,25 @@ import scoring
 import probe
 import engine
 import monitoring
+import ipv6_readiness
 from mock_ssh import get_ssh_runner
+
+
+def resolve_iran_v6(ir_runner) -> str | None:
+    """First global IPv6 address of the Iran host, via its runner.
+
+    Used when planning a tcp-lanes-v6 switch: the address is read off
+    the live host at switch time, never trusted from an old probe row
+    (addresses change). Any failure reads as None, and the caller
+    decides whether that blocks (a new v6 deploy) or is harmless (a
+    teardown plan, whose unit names and file paths never dial).
+    """
+    if ir_runner is None:
+        return None
+    try:
+        return (ipv6_readiness.detect_v6(ir_runner) or [None])[0]
+    except Exception:
+        return None
 
 class TunnelHealthReport(typing.NamedTuple):
     status: str             # "HEALTHY", "DEGRADED", "DOWN", "TRANSPORT-ONLY"
@@ -604,11 +622,22 @@ class FailoverManager:
             switchable away from - raising here would strand the pair on the transport the operator is
             trying to leave.
             """
+            iran_v6 = None
+            if protocol == "tcp-lanes-v6":
+                # Read off the live host: a probe row can go stale, and
+                # a v6 plan built on a dead address is a broken tunnel.
+                # When detection fails, the documentation placeholder
+                # keeps teardown naming working (unit names and file
+                # paths never dial); a NEW v6 deploy never reaches here
+                # with the placeholder, because execute_failover refuses
+                # a v6 target without a detected address up front.
+                iran_v6 = resolve_iran_v6(ir_runner) or ipv6_readiness.DOC_PLACEHOLDER
             return protocols.generate_deployment(
                 protocol, pair_id,
                 protocols.dial_address(pair["iran"], protocol),
                 protocols.dial_address(pair["foreign"], protocol),
-                frontend, backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
+                frontend, backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair),
+                iran_v6=iran_v6)
 
         # The carrier gate is the same single function the benchmark and the deploy path consult.
         # A switchover writes configs and starts units directly, without ever calling
@@ -674,6 +703,22 @@ class FailoverManager:
             if created_fr and hasattr(fr_runner, "close"):
                 fr_runner.close()
             raise
+
+        # A v6 target without a detected Iran address refuses here,
+        # before anything moves: plan_for's placeholder exists only so
+        # teardown naming survives a lost address, and a new tunnel
+        # dialing the placeholder would be a broken deploy followed by
+        # a rollback gap. The live tunnel is untouched by this refusal.
+        if target_protocol == "tcp-lanes-v6" and resolve_iran_v6(ir_runner) is None:
+            msg = ("tcp-lanes-v6 refused: the Iran host has no global "
+                   "IPv6 address right now")
+            storage.log_audit(pair_id, "FAILOVER_BLOCKED", "IPV6_UNAVAILABLE", msg)
+            return {
+                "success": False,
+                "blocked": True,
+                "reason": msg,
+                "current_protocol": current_protocol
+            }
 
         try:
             # Peel: the current transport is an overlay riding an

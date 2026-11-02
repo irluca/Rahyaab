@@ -51,8 +51,11 @@ def test_carrier_names_and_inners_with_tag_and_base():
 def test_every_generator_scopes_names_with_tag():
     """Every generator's units and paths carry the pair token, never bare p1."""
     for name, gen in protocols.GENERATORS.items():
+        # The gated v6 variant needs an address to plan at all;
+        # documentation range, never a live address.
+        v6kw = {"iran_v6": "2001:db8::1"} if name == "tcp-lanes-v6" else {}
         plan = gen(1, "192.0.2.10", "198.51.100.20", 45984,
-                   namespace="prod", tag="a1b2", base=20)
+                   namespace="prod", tag="a1b2", base=20, **v6kw)
         units = plan.get("iran_units", []) + plan.get("foreign_units", [])
         assert units, name
         for u in units:

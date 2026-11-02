@@ -2611,7 +2611,10 @@ class TestSupervisoryCompliance(unittest.TestCase):
         a credential, and no unit may reference a variable at all."""
         pair_id = 71
         for proto in protocols.ALL_PROTOCOLS:
-            plan = protocols.generate_deployment(proto, pair_id, "198.51.100.10", "203.0.113.20", 443)
+            # The gated v6 variant needs an address to plan at all;
+            # documentation range, never a live address.
+            v6kw = {"iran_v6": "2001:db8::1"} if proto == "tcp-lanes-v6" else {}
+            plan = protocols.generate_deployment(proto, pair_id, "198.51.100.10", "203.0.113.20", 443, **v6kw)
             for host_key in ("iran_files", "foreign_files"):
                 files = plan.get(host_key, {})
                 units = {p: c for p, c in files.items() if p.endswith(".service")}
@@ -2648,11 +2651,12 @@ class TestSupervisoryCompliance(unittest.TestCase):
         #    channel's stdin, so a secret must appear in the files and in the files only.
         for proto in protocols.ALL_PROTOCOLS:
             ir_rec, fr_rec = RecordingRunner(host_role="iran"), RecordingRunner(host_role="foreign")
+            v6kw = {"iran_v6": "2001:db8::1"} if proto == "tcp-lanes-v6" else {}
             res = engine.deploy_tunnel(pair={"id": 91, "name": "argv_census", "frontend": 443,
                                              "iran": {"host": "198.51.100.10", "port": 22},
                                              "foreign": {"host": "203.0.113.20", "port": 22}},
                                        choice=proto, dry_run=False, force_confirmed=True,
-                                       ir_runner=ir_rec, fr_runner=fr_rec)
+                                       ir_runner=ir_rec, fr_runner=fr_rec, **v6kw)
             self.assertTrue(res["ok"], f"{proto}: fixture deploy failed: {res}")
             collected = self._secrets_in(ir_rec.state["files"]) | self._secrets_in(fr_rec.state["files"])
             # GRE is the one generator with no credential to leak: it has no daemon and no key, which is
@@ -2981,7 +2985,8 @@ class TestSupervisoryCompliance(unittest.TestCase):
 
         # Every teardown and setup command the generators emit must also pass the filter.
         for proto in protocols.ALL_PROTOCOLS:
-            plan = protocols.generate_deployment(proto, 72, "198.51.100.10", "203.0.113.20", 443)
+            v6kw = {"iran_v6": "2001:db8::1"} if proto == "tcp-lanes-v6" else {}
+            plan = protocols.generate_deployment(proto, 72, "198.51.100.10", "203.0.113.20", 443, **v6kw)
             for cmd in (plan.get("iran_cmds", []) + plan.get("foreign_cmds", [])
                         + plan.get("teardown_iran", []) + plan.get("teardown_foreign", [])):
                 self.assertTrue(safety.check_command_safe(cmd), f"{proto}: generator emits a blocked command: {cmd[:90]}")
@@ -7508,9 +7513,11 @@ dM/5IlBnpCMejDaKAYLbcLo=
         IR, FR = "198.51.100.10", "203.0.113.20"
 
         def prod_plan(proto, pair_id=1):
+            v6kw = {"iran_v6": "2001:db8::1"} if proto == "tcp-lanes-v6" else {}
             return protocols.generate_deployment(proto, pair_id,
                                                  protocols.dial_address({"host": IR}, proto),
-                                                 protocols.dial_address({"host": FR}, proto), 443)
+                                                 protocols.dial_address({"host": FR}, proto), 443,
+                                                 **v6kw)
 
         # ---- 1. Inventory: every generator is classified, and the classification is read off the
         #         emitted config rather than asserted by a table.
@@ -12783,7 +12790,8 @@ dM/5IlBnpCMejDaKAYLbcLo=
                          "deployed, verified and monitored as though its delivery end were unknown")
 
         for proto in protocols.BACKEND_PORT_DECLARABLE:
-            plain = protocols.generate_deployment(proto, 10601, self.IR_IP, self.FR_IP, fe)
+            v6kw = {"iran_v6": "2001:db8::1"} if proto == "tcp-lanes-v6" else {}
+            plain = protocols.generate_deployment(proto, 10601, self.IR_IP, self.FR_IP, fe, **v6kw)
             info = protocols.backend_target(proto, plain)
             self.assertEqual(info["status"], "declared", f"{proto} with no declaration: {info}")
             self.assertEqual(info["port"], fe,
@@ -12791,7 +12799,7 @@ dM/5IlBnpCMejDaKAYLbcLo=
             self.assertEqual(info["lands_on"], "foreign", f"{proto}: {info}")
 
             told = protocols.generate_deployment(proto, 10601, self.IR_IP, self.FR_IP, fe,
-                                                 backend_port=be)
+                                                 backend_port=be, **v6kw)
             moved = protocols.backend_target(proto, told)
             self.assertEqual(moved["port"], be,
                              f"{proto} was told the delivery port is {be} and emitted {moved['port']} "

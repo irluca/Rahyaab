@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS pair_traffic_totals (
     last_tx INTEGER,
     updated_at REAL NOT NULL
 );
+-- IPv6 readiness per pair, from the detached probe runner: which
+-- side has a global address, whether each direction's TCP connect
+-- passed, and whether the reverse direction (foreign->Iran) is usable
+-- for tcp-lanes-v6. One row per pair, replaced on every probe; a
+-- pair with no row has simply never been probed, and the dashboard
+-- says so instead of implying anything.
+CREATE TABLE IF NOT EXISTS pair_ipv6_status (
+    pair_id INTEGER PRIMARY KEY REFERENCES pairs(id),
+    payload TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -326,14 +337,59 @@ class Store:
             pair_id = cur.lastrowid
         return self.get_pair(pair_id)
 
+    def _attach_ipv6(self, conn, pairs: list[dict]) -> list[dict]:
+        """Attach the latest probe payload to pair dicts, if any.
+
+        A separate table keeps pairs rows untouched; callers that
+        render pairs (the dashboard) read ipv6_status, and a missing
+        row means "never probed", not any verdict.
+        """
+        if not pairs:
+            return pairs
+        rows = conn.execute(
+            "SELECT pair_id, payload FROM pair_ipv6_status WHERE pair_id IN (%s)"
+            % ",".join("?" * len(pairs)),
+            [p["id"] for p in pairs]).fetchall()
+        by_id = {}
+        for pair_id, payload in rows:
+            try:
+                by_id[pair_id] = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                by_id[pair_id] = None
+        for pair in pairs:
+            pair["ipv6_status"] = by_id.get(pair["id"])
+        return pairs
+
+    def save_ipv6_status(self, pair_id: int, payload: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO pair_ipv6_status (pair_id, payload, updated_at)"
+                " VALUES (?, ?, ?)",
+                (pair_id, json.dumps(payload), time.time()))
+
+    def get_ipv6_status(self, pair_id: int) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM pair_ipv6_status WHERE pair_id = ?",
+                (pair_id,)).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
     def get_pair(self, pair_id: int) -> dict | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM pairs WHERE id = ?", (pair_id,)).fetchone()
-            return _decode(row) if row else None
+            if not row:
+                return None
+            return self._attach_ipv6(conn, [_decode(row)])[0]
 
     def list_pairs(self) -> list[dict]:
         with self._connect() as conn:
-            return [_decode(r) for r in conn.execute("SELECT * FROM pairs ORDER BY id")]
+            return self._attach_ipv6(
+                conn, [_decode(r) for r in conn.execute("SELECT * FROM pairs ORDER BY id")])
 
     def update_pair_healer(self, pair_id: int, status: dict) -> None:
         now = time.time()

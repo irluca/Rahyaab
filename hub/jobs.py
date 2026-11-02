@@ -579,6 +579,65 @@ def _handle_spoof_probe(store, job, make_executor):
             "unit": "rahyaab-spoof-probe-p%d.scope" % pair_id, "log": log}
 
 
+def _ipv6_probe_script_path():
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "orchestrator", "run_ipv6_probe.py")
+
+
+def _ipv6_probe_pidfile(pair_id):
+    import os
+    base = os.environ.get("RAHYAAB_SWEEP_DIR", "/var/lib/rahyaab")
+    return os.path.join(base, "ipv6-probe-p%d.pid" % int(pair_id))
+
+
+def _ipv6_probe_running(pair_id):
+    """Mirror of _probe_running for the IPv6 probe scope unit."""
+    import os
+    import subprocess
+    try:
+        rc = subprocess.run(
+            ["systemctl", "is-active",
+             "rahyaab-ipv6-probe-p%d.scope" % int(pair_id)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if rc == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        with open(_ipv6_probe_pidfile(pair_id)) as f:
+            pid = int(f.read().strip().split()[0])
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _handle_ipv6_probe(store, job, make_executor):
+    import os
+    import shlex
+    import sys
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("ipv6_probe job has no pair")
+    pair_id = pair["id"]
+    if _ipv6_probe_running(pair_id):
+        return {"status": "already-running", "pair_id": pair_id}
+    script = _ipv6_probe_script_path()
+    if not os.path.exists(script):
+        raise FileNotFoundError("ipv6 probe runner not found: %s" % script)
+    log = "/var/log/rahyaab-ipv6-probe-p%d.log" % pair_id
+    inner = ("%s %s --pair-id %d --hub-db %s > %s 2>&1; echo EXIT_CODE:$? >> %s" % (
+        shlex.quote(sys.executable), shlex.quote(script), pair_id,
+        shlex.quote(str(store.db_path)),
+        shlex.quote(log), shlex.quote(log)))
+    argv = ["systemd-run", "--scope", "--unit=rahyaab-ipv6-probe-p%d" % pair_id,
+            "bash", "-c", inner]
+    _spawn_sweep(argv)
+    return {"status": "started", "pair_id": pair_id,
+            "unit": "rahyaab-ipv6-probe-p%d.scope" % pair_id, "log": log}
+
+
 def _handle_sweep(store, job, make_executor):
     import os
     import shlex
@@ -656,7 +715,30 @@ HANDLERS = {
     "sweep": _handle_sweep,
     "quick_test": _handle_quick_test,
     "spoof_probe": _handle_spoof_probe,
+    "ipv6_probe": _handle_ipv6_probe,
 }
+
+
+def backfill_ipv6_probes(store) -> list[int]:
+    """Enqueue an IPv6 probe for every pair never probed.
+
+    Mirror of backfill_spoof_probes: pairs joined before the gate
+    landed would otherwise never get a verdict, and the rule is every
+    pair. A pair with a queued probe is never duplicated; a pair whose
+    probe failed stays unprobed and re-queues on the next start.
+    """
+    enqueued = []
+    for pair in store.list_pairs():
+        if pair.get("ipv6_status") is not None:
+            continue
+        try:
+            if store.has_queued_job("ipv6_probe", pair["id"]):
+                continue
+            store.create_job("ipv6_probe", pair["id"], {})
+            enqueued.append(pair["id"])
+        except Exception:
+            pass
+    return enqueued
 
 
 def backfill_spoof_probes(store) -> list[int]:
@@ -738,6 +820,10 @@ class Worker(threading.Thread):
                         pass
                     try:
                         self.store.create_job("spoof_probe", job["pair_id"], {})
+                    except Exception:
+                        pass
+                    try:
+                        self.store.create_job("ipv6_probe", job["pair_id"], {})
                     except Exception:
                         pass
             except Exception as exc:
