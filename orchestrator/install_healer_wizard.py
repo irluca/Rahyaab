@@ -73,7 +73,8 @@ def wizard_install(iran_host: str, foreign_host: str, pair_id: int,
                    pair_name: str, frontend_port: int, active_tunnel: str,
                    candidate_scores: dict, hub_key_path: str,
                    code_dir: str | None = None,
-                   settle_seconds: float = 25) -> dict:
+                   settle_seconds: float = 25, hub_tag: str = "",
+                   inner_base: int = 10) -> dict:
     """Install + start the healer for a wizard pair. Returns install()'s
     verification summary (steps, once output, heartbeat, active)."""
     code_dir = code_dir or os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +84,8 @@ def wizard_install(iran_host: str, foreign_host: str, pair_id: int,
         "foreign_host": foreign_host, "foreign_port": 22,
         "frontend_port": frontend_port,
         "active_tunnel": active_tunnel,
+        "hub_tag": hub_tag or "",
+        "inner_base": int(inner_base or 10),
     }
     cfg = install_healer.build_healer_config(row, dict(candidate_scores),
                                              telegram=None)

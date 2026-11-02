@@ -3405,8 +3405,8 @@ class TestSupervisoryCompliance(unittest.TestCase):
                                           engine.measure_direct_base_rtt)
         real_supported = protocols.get_supported_protocols
         protocols.generate_deployment = (
-            lambda proto, pid, ir_ip, fr_ip, frontend:
-            (seen_dep.append((ir_ip, fr_ip)), real_dep(proto, pid, ir_ip, fr_ip, frontend))[1])
+            lambda proto, pid, ir_ip, fr_ip, frontend, **kw:
+            (seen_dep.append((ir_ip, fr_ip)), real_dep(proto, pid, ir_ip, fr_ip, frontend, **kw))[1])
         protocols.generate_benchmark_plan = (
             lambda proto, pid, ir_ip, fr_ip, **kw:
             (seen_bench.append((ir_ip, fr_ip)), real_bench(proto, pid, ir_ip, fr_ip, **kw))[1])
@@ -10588,7 +10588,7 @@ dM/5IlBnpCMejDaKAYLbcLo=
         # The constant and the migrations have to move together, and in both directions: bumping the number
         # with no migration leaves every "reached the current schema" assertion in this file lying, and
         # writing a migration without bumping it is the same defect wearing the other hat.
-        self.assertEqual(storage.SCHEMA_VERSION, 14, "migration 14 (Phase 6 health history) is "
+        self.assertEqual(storage.SCHEMA_VERSION, 15, "migration 15 (multi-master pair identity) is "
                                                     "the newest this round writes")
         self.assertEqual(storage.get_schema_version(), storage.SCHEMA_VERSION)
         with storage.db_session() as conn:

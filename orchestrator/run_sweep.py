@@ -256,6 +256,11 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
                 "auth": {"type": "key", "value": HUB_KEY},
                 "dial_host": dial_host}
 
+    # Bench names and bench inners derive from this hub's identity, so
+    # two hubs benching the same node at once never share a bench
+    # interface or bench /30. The pair's production tag/base live in the
+    # engine row and are irrelevant to transient bench units.
+    _identity = store.get_hub_identity()
     engine_pair = {
         "id": pair_id,
         "iran": spec(iran, pair["inner_iran"]),
@@ -263,6 +268,8 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
         "frontend_port": int(pair.get("frontend_port") or 443),
         "base_rtt_ms": 0.0,  # the engine measures its own baseline
         "underlay_carrier": (pair.get("current_protocol") or "GRE").lower(),
+        "hub_tag": _identity["hub_tag"],
+        "inner_base": _identity["inner_base"],
     }
 
     # Spoof is probe-gated, not score-gated: the ladder benches it only

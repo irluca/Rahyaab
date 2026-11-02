@@ -48,6 +48,8 @@ It installs the hub, enables BBR, asks for a domain or IP certificate, registers
 
 Notes: the join code is single-use — printing a new one invalidates the old one, and you can print a fresh one from Manage in the installer menu. The browser warns once about the self-signed IP certificate; compare its fingerprint with the one the installer printed. Re-running the installer is safe: it never overwrites the database or existing certificates.
 
+**A second master sharing the same nodes.** One foreign node can serve two masters at once (for example, an old and a new Iran server): each hub carries its own short tag and its own inner address base, so the second hub's units, interfaces and inners never overwrite or misroute the first hub's. The first hub uses base 10; a new hub installed from this installer gets base 20 by default, and `--inner-base 30` (any even number from 12 to 250) picks another. Before deploying, the wizard reads both hosts and refuses the join — naming the colliding interface, address or unit — instead of breaking the tunnel that already owns them.
+
 **Alternative: full setup from the master, one command:**
 
 ```bash

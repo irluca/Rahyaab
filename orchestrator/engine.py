@@ -445,7 +445,7 @@ def carrier_camouflage_block(pair: dict, protocol: str) -> str:
     return ""
 
 
-def declare_carrier(pair_id: int, protocol: str, dry_run: bool) -> None:
+def declare_carrier(pair_id: int, protocol: str, dry_run: bool, tag: str = "", base: int = 10) -> None:
     """Persist that this pair's overlay now arrives inside `protocol`'s envelope, with its inner addresses.
 
     Called on the success path only. The carrier declaration is what the gate above reads to decide
@@ -455,7 +455,7 @@ def declare_carrier(pair_id: int, protocol: str, dry_run: bool) -> None:
     """
     if protocol not in protocols.CARRIER_PROTOCOLS or dry_run:
         return
-    tun_ir, tun_fr = protocols.carrier_inner_pair(protocol, pair_id, "prod")
+    tun_ir, tun_fr = protocols.carrier_inner_pair(protocol, pair_id, "prod", base)
     storage.set_pair_underlay(pair_id, protocol.lower(), iran_dial_host=tun_ir,
                               foreign_dial_host=tun_fr)
 
@@ -473,7 +473,7 @@ def retract_carrier(pair_id: int, protocol: str, dry_run: bool) -> None:
 
 
 def carrier_inner_reachable(ir_runner, protocol: str, pair_id: int,
-                            samples: int = UNDERLAY_PROBE_SAMPLES) -> tuple[bool, str]:
+                            samples: int = UNDERLAY_PROBE_SAMPLES, tag: str = "", base: int = 10) -> tuple[bool, str]:
     """Ping the peer's inner address through the carrier interface - the only verdict a carrier accepts.
 
     A carrier has no daemon and no listening socket: its frontend is an iptables DNAT, which locally
@@ -487,8 +487,8 @@ def carrier_inner_reachable(ir_runner, protocol: str, pair_id: int,
     trigger a switchover on a path carrying 2-4% random loss - the loss this pair's own underlay measures.
     It now counts enough samples for the threshold to mean something and judges the percentage.
     """
-    iface = protocols.carrier_iface(protocol, pair_id, "prod")
-    target = protocols.carrier_inner_pair(protocol, pair_id, "prod")[1]
+    iface = protocols.carrier_iface(protocol, pair_id, "prod", tag)
+    target = protocols.carrier_inner_pair(protocol, pair_id, "prod", base)[1]
     # The SSH read timeout has to outlast the ping's own worst case (packets x interval, plus a -W per
     # unanswered packet), or a lossy path is reported as a transport error instead of as loss - the
     # invariant the benchmark's ping probes at step 4 already state.
@@ -514,7 +514,7 @@ def _local_addresses(pair: dict, side: str) -> set:
         # Side-aware, and it has to be: the tuple is (Iran, Foreign), so the address this host holds is
         # index 0 from Iran and index 1 from Foreign. Reading index 0 on both sides left the Foreign
         # preflight holding Iran's inner address as "local" and its own as a remote target.
-        inner = protocols.carrier_inner_pair(carrier.upper(), int(pair.get("id") or 1), "prod")
+        inner = protocols.carrier_inner_pair(carrier.upper(), int(pair.get("id") or 1), "prod", protocols.pair_base(pair))
         out.add(inner[0] if side == "iran" else inner[1])
     out.discard("")
     return out
@@ -590,8 +590,8 @@ def underlay_preflight(pair: dict, ir_runner, fr_runner,
                not has_carrier)
 
         if has_carrier:
-            iface = protocols.carrier_iface(proto, pair_id, "prod")
-            inner = protocols.carrier_inner_pair(proto, pair_id, "prod")
+            iface = protocols.carrier_iface(proto, pair_id, "prod", protocols.pair_tag(pair))
+            inner = protocols.carrier_inner_pair(proto, pair_id, "prod", protocols.pair_base(pair))
             # (Iran, Foreign) - so which end is *this* host depends on who is asking, and the probe has to
             # be aimed at the other one. Taking index [1] for both sides measures Foreign answering itself,
             # which is the one result a preflight must never print as a pass.
@@ -1445,11 +1445,11 @@ def carrier_slot_rule(pairs) -> list:
             "host_role": role,
             "pair_id": int(holding["id"]),
             "pair_name": holding.get("name") or f"pair {holding['id']}",
-            "iface": protocols.carrier_iface("ESP", int(holding["id"]), "prod"),
+            "iface": protocols.carrier_iface("ESP", int(holding["id"]), "prod", protocols.pair_tag(holding)),
             "claimants": len(claimants),
             "would_be_refused": [
                 {"pair_id": int(c["id"]), "pair_name": c.get("name") or f"pair {c['id']}",
-                 "iface": protocols.carrier_iface("ESP", int(c["id"]), "prod")} for c in claimants[1:]],
+                 "iface": protocols.carrier_iface("ESP", int(c["id"]), "prod", protocols.pair_tag(c))} for c in claimants[1:]],
         })
     return sorted(slots, key=lambda s: (s["host_role"], s["pair_id"]))
 
@@ -1765,7 +1765,7 @@ nohup python3 -u /tmp/best_test_backend.py >/dev/null 2>&1 & echo $! > /tmp/best
                             preflight=preflight_report)
 
             # Clean Execution Checklist 4: Deploy temporary test tunnel (namespace='bench')
-            bplan = protocols.generate_benchmark_plan(protocol, pair_id, ir_ip, fr_ip, test_frontend=test_frontend, test_transport=test_transport)
+            bplan = protocols.generate_benchmark_plan(protocol, pair_id, ir_ip, fr_ip, test_frontend=test_frontend, test_transport=test_transport, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
             blocked_pin = destination_pin_block(pair_id, protocol, bplan, record=False)
             if blocked_pin:
                 # Judged on the plan that is about to be written, not on a separately generated one:
@@ -1784,7 +1784,7 @@ nohup python3 -u /tmp/best_test_backend.py >/dev/null 2>&1 & echo $! > /tmp/best
                 for role, r, local, remote in (("iran", ir_runner, ir_ip, fr_ip),
                                                ("foreign", fr_runner, fr_ip, ir_ip)):
                     blocked_vti = carrier_vti_conflict(
-                        r, role, local, remote, protocols.carrier_iface("ESP", pair_id, "bench"))
+                        r, role, local, remote, protocols.carrier_iface("ESP", pair_id, "bench", protocols.pair_tag(pair)))
                     if blocked_vti:
                         cooldown_needed = 60
                         return _blocked_row(protocol, profile, base_rtt,
@@ -1840,8 +1840,8 @@ nohup python3 -u /tmp/best_test_backend.py >/dev/null 2>&1 & echo $! > /tmp/best
             if protocol in protocols.INNER_PROBED:
                 # A carrier is measured on its inner address: nothing listens on a loopback frontend,
                 # the thing under test is whether packets cross the envelope.
-                tun_inner_ip = protocols.carrier_inner_pair(protocol, pair_id, "bench")[1]
-                inner_iface = protocols.carrier_iface(protocol, pair_id, "bench")
+                tun_inner_ip = protocols.carrier_inner_pair(protocol, pair_id, "bench", protocols.pair_base(pair))[1]
+                inner_iface = protocols.carrier_iface(protocol, pair_id, "bench", protocols.pair_tag(pair))
                 target_ip = tun_inner_ip
             else:
                 target_ip = "127.0.0.1"
@@ -2158,8 +2158,8 @@ nohup python3 -u /tmp/best_test_backend.py >/dev/null 2>&1 & echo $! > /tmp/best
                     fr_runner.run(f"systemctl stop {u}; systemctl disable {u}", best_effort=True,
                                   timeout=protocols.TEARDOWN_TIMEOUT_SEC)
                 if protocol == "GRE":
-                    ir_runner.run(f"ip tunnel del grep{pair_id}b", best_effort=True)
-                    fr_runner.run(f"ip tunnel del grep{pair_id}b", best_effort=True)
+                    ir_runner.run(f"ip tunnel del {protocols.carrier_iface('GRE', pair_id, 'bench', protocols.pair_tag(pair))}", best_effort=True)
+                    fr_runner.run(f"ip tunnel del {protocols.carrier_iface('GRE', pair_id, 'bench', protocols.pair_tag(pair))}", best_effort=True)
                 if protocol == "ESP":
                     # Mirror the GRE bench cleanup above: a bench VTI link
                     # persists after its unit stops (by design no lifecycle
@@ -2170,7 +2170,7 @@ nohup python3 -u /tmp/best_test_backend.py >/dev/null 2>&1 & echo $! > /tmp/best
                     # stopped above; the set-down first keeps the delete
                     # off a loaded VTI (whose unregister parks), which is
                     # the hazard the prod-carrier no-delete rule guards.
-                    iface = protocols.carrier_iface("ESP", pair_id, "bench")
+                    iface = protocols.carrier_iface("ESP", pair_id, "bench", protocols.pair_tag(pair))
                     ir_runner.run(f"ip link set {iface} down 2>/dev/null; ip link delete {iface}", best_effort=True)
                     fr_runner.run(f"ip link set {iface} down 2>/dev/null; ip link delete {iface}", best_effort=True)
             ir_runner.run("fuser -k 8897/tcp 8898/tcp; rm -f /tmp/best-test-* /tmp/best_test* /tmp/test*", best_effort=True)
@@ -2412,7 +2412,7 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
     # this protocol - so a gate that fires before anything is touched refuses without taking a live
     # tunnel down with it.
     plan = protocols.generate_deployment(choice, pair_id, ir_ip, fr_ip, frontend,
-                                         backend_port=backend_port)
+                                         backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
     blocked_target = backend_target_block(choice, frontend, backend_port, plan)
     if blocked_target:
         # Same placement rule as the two gates below it: decide before the frontend is released, because a
@@ -2460,7 +2460,7 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
         if choice in protocols.INNER_PROBED and not dry_run:
             _, o_pre, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True)
             conflict = carrier_dnat_conflict(o_pre, frontend,
-                                            protocols.carrier_inner_pair(choice, pair_id, "prod")[1])
+                                            protocols.carrier_inner_pair(choice, pair_id, "prod", protocols.pair_base(pair))[1])
             if conflict:
                 raise ValueError(CARRIER_DNAT_CONFLICT.format(conflict=conflict))
             # The other way a carrier can be pre-empted on these hosts, and the one that actually happened on
@@ -2471,7 +2471,7 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
             # freed enters the rollback branch and tears down the current deployment of this protocol, which for
             # a carrier means an outage caused by declining to make a change.
             if choice == "ESP":
-                iface = protocols.carrier_iface("ESP", pair_id, "prod")
+                iface = protocols.carrier_iface("ESP", pair_id, "prod", protocols.pair_tag(pair))
                 for role, r, local, remote in (("iran", ir_runner, ir_ip, fr_ip),
                                                ("foreign", fr_runner, fr_ip, ir_ip)):
                     blocked_vti = carrier_vti_conflict(r, role, local, remote, iface)
@@ -2559,10 +2559,10 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
             # Live verification with real data probe
             if choice in protocols.INNER_PROBED:
                 # A carrier: inner ICMP through its interface, plus the DNAT that puts traffic into it.
-                reached, o_v = carrier_inner_reachable(ir_runner, choice, pair_id)
+                reached, o_v = carrier_inner_reachable(ir_runner, choice, pair_id, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
                 _, o_nat, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True,
                                             retryable=True)
-                inner_peer = protocols.carrier_inner_pair(choice, pair_id, "prod")[1]
+                inner_peer = protocols.carrier_inner_pair(choice, pair_id, "prod", protocols.pair_base(pair))[1]
                 # The destination, not the port. `--dport 443` is present in this chain whether or not the
                 # rule that answers it is the one this carrier just appended, and PREROUTING is
                 # first-match, so a dport-only test certifies an envelope whose traffic goes elsewhere -
@@ -2654,7 +2654,7 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
         # 8. A carrier is the one deployment that changes what the *pair* is, not just what runs on it:
         #    record the envelope the gate above reads, so REALITY on this pair is judged against ESP
         #    rather than against the GRE inference that was true until a minute ago.
-        declare_carrier(pair_id, choice, dry_run)
+        declare_carrier(pair_id, choice, dry_run, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
         declare_backend(pair_id, choice, frontend, backend_port, backend_state, dry_run)
 
         return {
@@ -2676,7 +2676,7 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
         # pair rather than random: a rolled-back ESP must delete the SAs this attempt installed, and an
         # ephemeral SPI would have named states that never existed while the real ones stayed put.
         plan = protocols.generate_deployment(choice, pair_id, ir_ip, fr_ip, frontend,
-                                            backend_port=backend_port)
+                                            backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
         # A rollback step that cannot complete must not become the reported failure. Measured on the live
         # pair on 2026-10-11: the ESP carrier's `ip link del` on the Foreign host blocked in the kernel for
         # minutes (`unregister_netdevice: waiting for espp1 to become free. Usage count = -895`, seven
@@ -2704,7 +2704,7 @@ def deploy_tunnel(pair: dict, choice: str, dry_run: bool = True,
         if choice == "GRE":
             for role, runner in (("iran", ir_runner), ("foreign", fr_runner)):
                 try:
-                    runner.run(f"ip tunnel del grep{pair_id}", best_effort=True,
+                    runner.run(f"ip tunnel del {protocols.carrier_iface('GRE', pair_id, 'prod', protocols.pair_tag(pair))}", best_effort=True,
                                timeout=protocols.TEARDOWN_TIMEOUT_SEC)
                 except Exception as tex:
                     stalled.append(f"{role}:{type(tex).__name__}")

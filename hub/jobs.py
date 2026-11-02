@@ -428,7 +428,9 @@ def _handle_full_setup(store, job, make_executor):
             pair.get("name") or "", str(store.db_path),
             inp.get("hub_key_path") or "/etc/rahyaab/hub_key",
             frontend_port=int(inp.get("frontend_port") or 443),
-            protocol=inp.get("protocol") or "GRE")
+            protocol=inp.get("protocol") or "GRE",
+            hub_tag=inp.get("hub_tag") or "",
+            inner_base=int(inp.get("inner_base") or 10))
     except Exception as exc:
         # A transient transport failure must not kill the setup
         # permanently: the measure leaves no production state behind

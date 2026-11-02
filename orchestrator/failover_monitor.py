@@ -98,7 +98,7 @@ def sample_saturation(ir_runner, pair: dict, window_s: float) -> dict | None:
     kind = protocols.carrier_kind(pair)
     if kind not in ("gre", "esp"):
         return None
-    iface = protocols.carrier_iface(kind.upper(), pair.get("id", 1), "prod")
+    iface = protocols.carrier_iface(kind.upper(), pair.get("id", 1), "prod", protocols.pair_tag(pair))
     c1 = monitoring.read_iface_counters(ir_runner, iface)
     if window_s and window_s > 0:
         time.sleep(window_s)
@@ -146,6 +146,8 @@ def pairs_from_storage() -> list[dict]:
             # fail-closed but wrong for an ESP underlay, and would keep REALITY out of the ranking on a
             # pair whose envelope is encrypted.
             "underlay_carrier": row.get("underlay_carrier", ""),
+            "hub_tag": row.get("hub_tag", "") or "",
+            "inner_base": row.get("inner_base", 10) or 10,
             "iran": {"host": row["iran_host"], "port": row.get("iran_port", 22), "user": "root",
                      **({"dial_host": row["iran_dial_host"]} if row.get("iran_dial_host") else {})},
             "foreign": {"host": row["foreign_host"], "port": row.get("foreign_port", 22), "user": "root",
@@ -473,7 +475,7 @@ class FailoverMonitor:
             ir_ip = protocols.dial_address(pair["iran"], active)
             fr_ip = protocols.dial_address(pair["foreign"], active)
             frontend = pair.get("frontend_port", pair.get("frontend", 443))
-            plan = protocols.generate_deployment(active, pid, ir_ip, fr_ip, frontend)
+            plan = protocols.generate_deployment(active, pid, ir_ip, fr_ip, frontend, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
         except Exception:
             return False, None
         try:

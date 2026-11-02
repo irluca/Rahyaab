@@ -24,7 +24,7 @@ DB_PATH = os.environ.get("BEST_TUNNEL_DB_PATH") or os.path.join(os.path.dirname(
 # stops being a control: when v9 landed, two unrelated persistence tests failed on `== 8` - the migrations
 # they were checking had run correctly. Bump it in the same change as the migration it names; test_93
 # fails if the two drift apart in either direction.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # A failed remote command is recorded as an execution error, and the runner's error text starts with
 # the hostname it was talking to ("Remote command failed (exit 1) on 203.0.113.20: systemctl ...").
@@ -194,6 +194,8 @@ def init_db():
                 frontend_port INTEGER DEFAULT 443,
                 status TEXT DEFAULT 'NEW',
                 active_tunnel TEXT DEFAULT '',
+                hub_tag TEXT DEFAULT '',
+                inner_base INTEGER DEFAULT 10,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
@@ -540,6 +542,22 @@ def init_db():
                          "VALUES (14, ?, ?)",
                          (now, "Add persistent health history (Phase 6 Health Center)"))
 
+        # Migration 15: multi-master pair identity. A pair deployed by a
+        # second hub must keep its own unit names, interfaces and inner
+        # addresses on a node shared with the first hub, so the deploy
+        # records the hub tag and inner base it was built with. Rows
+        # written before this migration keep "" / 10, which reproduce
+        # today's unscoped names and 10.10/10.12 inners exactly.
+        if 15 not in applied_versions:
+            cols = get_column_names(conn, "pairs")
+            if "hub_tag" not in cols:
+                conn.execute("ALTER TABLE pairs ADD COLUMN hub_tag TEXT DEFAULT '';")
+            if "inner_base" not in cols:
+                conn.execute("ALTER TABLE pairs ADD COLUMN inner_base INTEGER DEFAULT 10;")
+            conn.execute("INSERT OR REPLACE INTO schema_version (version, applied_at, description) "
+                         "VALUES (15, ?, ?)",
+                         (now, "Add hub_tag/inner_base to pairs (multi-master)"))
+
 
 def _legs_from_details(blob):
     """The two iperf3 legs recorded inside a stored row's details_json, or None when it carries none.
@@ -603,7 +621,8 @@ def add_pair(name: str, iran_host: str, foreign_host: str, frontend_port: int = 
 
 def ensure_pair_row(pair_id: int, name: str, iran_host: str, foreign_host: str,
                     frontend_port: int = 443, iran_port: int = 22,
-                    foreign_port: int = 22) -> bool:
+                    foreign_port: int = 22, hub_tag: str = "",
+                    inner_base: int = 10) -> bool:
     """Create the pair row with this exact id when it is missing.
 
     The carrier declaration (set_pair_underlay) is UPDATE-only by design:
@@ -626,18 +645,21 @@ def ensure_pair_row(pair_id: int, name: str, iran_host: str, foreign_host: str,
             cur.execute("""
                 INSERT INTO pairs (id, name, iran_host, iran_port, foreign_host,
                                    foreign_port, frontend_port, status,
-                                   active_tunnel, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW', '', ?, ?)
+                                   active_tunnel, hub_tag, inner_base,
+                                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW', '', ?, ?, ?, ?)
             """, (pair_id, name, iran_host, iran_port, foreign_host, foreign_port,
-                  frontend_port, now, now))
+                  frontend_port, hub_tag or "", int(inner_base or 10), now, now))
         except sqlite3.IntegrityError:
             cur.execute("""
                 INSERT INTO pairs (id, name, iran_host, iran_port, foreign_host,
                                    foreign_port, frontend_port, status,
-                                   active_tunnel, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW', '', ?, ?)
+                                   active_tunnel, hub_tag, inner_base,
+                                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW', '', ?, ?, ?, ?)
             """, (pair_id, "%s#%d" % (name, pair_id), iran_host, iran_port,
-                  foreign_host, foreign_port, frontend_port, now, now))
+                  foreign_host, foreign_port, frontend_port, hub_tag or "",
+                  int(inner_base or 10), now, now))
     return True
 
 

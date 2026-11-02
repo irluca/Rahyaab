@@ -129,6 +129,37 @@ class Store:
             if "spoof_status" not in cols:
                 conn.execute("ALTER TABLE pairs ADD COLUMN "
                              "spoof_status TEXT NOT NULL DEFAULT 'unknown'")
+            conn.execute("CREATE TABLE IF NOT EXISTS settings ("
+                         "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        """One hub setting by key; missing keys return the default."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?",
+                               (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) "
+                         "VALUES (?, ?)", (key, value))
+
+    def get_hub_identity(self) -> dict:
+        """This hub's multi-master identity, seeded by the installer.
+
+        Unset (a hub installed before multi-master, or any hub whose
+        installer predates it) means the legacy identity: no tag and
+        inner base 10, which reproduces today's names and inners exactly.
+        A hub installed after multi-master carries a short random tag and
+        its own inner base (20, 30, ...), so its pairs never collide
+        with another hub's on a shared node.
+        """
+        try:
+            base = int(self.get_setting("inner_base", "10") or 10)
+        except ValueError:
+            base = 10
+        return {"hub_tag": self.get_setting("hub_tag", "") or "",
+                "inner_base": base}
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

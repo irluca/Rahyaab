@@ -103,8 +103,15 @@ def seed_host_pins(known_hosts_path: str, hosts: list, pin_fn=None) -> list:
 
 
 def pair_spec(iran_host: str, foreign_host: str, hub_key_path: str,
-              pair_id: int, frontend_port: int = 443) -> dict:
-    """Engine pair dict with key auth on both legs."""
+              pair_id: int, frontend_port: int = 443, hub_tag: str = "",
+              inner_base: int = 10) -> dict:
+    """Engine pair dict with key auth on both legs.
+
+    hub_tag/inner_base travel with the pair from here on: every unit,
+    config, interface and inner address the deploy, the healer and the
+    sweep generate for this pair derives from them, so a pair deployed
+    by a second hub can never overwrite or misroute the first hub's.
+    """
     auth = {"type": "key", "value": hub_key_path}
     return {
         "id": pair_id,
@@ -112,7 +119,63 @@ def pair_spec(iran_host: str, foreign_host: str, hub_key_path: str,
         "foreign": {"host": foreign_host, "port": 22, "user": "root", "auth": auth},
         "frontend": frontend_port,
         "base_rtt_ms": 0.0,
+        "hub_tag": hub_tag or "",
+        "inner_base": int(inner_base or 10),
     }
+
+
+def preflight_collision_check(pair: dict, ir_runner, fr_runner) -> None:
+    """Refuse a setup whose carrier inners or node-side names already exist.
+
+    A second hub's pair 1 would otherwise deploy grep1/espp1 and
+    10.10.11.x onto a node where the first hub's pair 1 already lives,
+    and the second deploy would either fail or break the first tunnel.
+    This check reads both hosts (read-only) before any measure runs and
+    raises ValueError naming the offending object and host, so the
+    failure is a refused join — never a broken tunnel. It also catches
+    the single-hub case the scheme itself cannot: pair ids wrap at 200,
+    so pair 201 would otherwise silently reuse pair 1's inners.
+    """
+    import re
+    tag = pair.get("hub_tag") or ""
+    base = int(pair.get("inner_base") or 10)
+    pid = int(pair.get("id") or 1)
+    idx = (pid % 200) + 10
+    planned_ifaces = {"grep%d%s" % (pid, tag), "espp%d%s" % (pid, tag)}
+    planned_unit_prefix = "best-tunnel-prod-p%d-%s-" % (pid, tag) if tag else "best-tunnel-prod-p%d-" % pid
+    for role, runner in (("iran", ir_runner), ("foreign", fr_runner)):
+        _, out_addr, _ = runner.run("ip -o addr show", best_effort=True)
+        _, out_link, _ = runner.run("ip -o link show", best_effort=True)
+        _, out_units, _ = runner.run(
+            "systemctl list-units 'best-tunnel-prod-*' --all --no-legend",
+            best_effort=True)
+        for line in (out_addr or "").splitlines():
+            m = re.search(r"inet (\d+)\.(\d+)\.(\d+)\.(\d+)/", line)
+            if not m:
+                continue
+            o1, o2, o3, o4 = (int(x) for x in m.groups())
+            if o1 == 10 and o2 in (base, base + 2) and o3 == idx and o4 <= 3:
+                raise ValueError(
+                    "preflight: %s already has address %d.%d.%d.%d on a carrier "
+                    "interface — this pair's inner /30 (base %d, pair %d) is "
+                    "already in use there, most likely by another hub's pair. "
+                    "Install this hub with a different inner base."
+                    % (role, o1, o2, o3, o4, base, pid))
+        for line in (out_link or "").splitlines():
+            m = re.match(r"\d+: ([^:]+):", line)
+            if m and m.group(1) in planned_ifaces:
+                raise ValueError(
+                    "preflight: %s already has carrier interface %s — a "
+                    "carrier for this pair id and hub tag is already deployed "
+                    "there; remove it before joining again."
+                    % (role, m.group(1)))
+        for line in (out_units or "").splitlines():
+            unit = line.split()[0] if line.split() else ""
+            if unit.startswith(planned_unit_prefix):
+                raise ValueError(
+                    "preflight: %s already has unit %s — a production unit "
+                    "for this pair id and hub tag is already deployed there; "
+                    "remove it before joining again." % (role, unit))
 
 
 def measure_single_protocol(pair: dict, protocol: str) -> dict:
@@ -201,7 +264,9 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
               frontend_port: int = 443, protocol: str = DEFAULT_PROTOCOL,
               known_hosts_path: str = "/root/.ssh/known_hosts",
               pin_fn=None, measure_fn=None, deploy_fn=None,
-              install_fn=None, record_fn=None, ensure_fn=None) -> dict:
+              install_fn=None, record_fn=None, ensure_fn=None,
+              hub_tag: str = "", inner_base: int = 10,
+              preflight_fn=None, preflight: bool = True) -> dict:
     """Measure, deploy, install the healer, record. Returns a summary.
 
     The *_fn arguments default to the real implementations; tests
@@ -225,7 +290,24 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
                             [(iran_host, 22), (foreign_host, 22)],
                             pin_fn=pin_fn)
     pair = pair_spec(iran_host, foreign_host, hub_key_path, pair_id,
-                     frontend_port)
+                     frontend_port, hub_tag=hub_tag, inner_base=inner_base)
+    # Multi-master pre-flight: refuse before any measure creates state
+    # when this pair's inners or names already exist on either host.
+    # Skipped only by tests, which cover the check itself directly;
+    # a skipped pre-flight creates no runners at all, so no SSH happens.
+    if preflight:
+        if preflight_fn is None:
+            preflight_fn = preflight_collision_check
+        from mock_ssh import get_ssh_runner
+        _ir_pre = get_ssh_runner(pair["iran"], dry_run=False, host_role="iran")
+        try:
+            _fr_pre = get_ssh_runner(pair["foreign"], dry_run=False, host_role="foreign")
+            try:
+                preflight_fn(pair, _ir_pre, _fr_pre)
+            finally:
+                _fr_pre.close()
+        finally:
+            _ir_pre.close()
     # Bug 15: try candidates in order and deploy the first one that
     # measures clean, instead of failing the whole setup on the first
     # protocol. A pair that ends up connected to nothing is the
@@ -237,16 +319,19 @@ def run_setup(iran_host: str, foreign_host: str, pair_id: int,
     # pair row must exist before deploy runs — no wizard caller ever
     # created it, and every deploy's declaration was silently dropped
     # (bug 12, 2026-11-01). Ensuring it here costs nothing on re-runs.
-    ensure_fn(pair_id, pair_name, iran_host, foreign_host, frontend_port)
+    ensure_fn(pair_id, pair_name, iran_host, foreign_host, frontend_port,
+              hub_tag=hub_tag, inner_base=inner_base)
     deploy = deploy_fn(pair, protocol)
     install = install_fn(iran_host, foreign_host, pair_id, pair_name,
                          frontend_port, protocol, {protocol: score},
-                         hub_key_path)
+                         hub_key_path, hub_tag=hub_tag, inner_base=inner_base)
     record_fn(hub_db_path, pair_id, {protocol: score}, protocol)
     return {
         "protocol": protocol,
         "score": score,
         "tried": tried,
+        "hub_tag": hub_tag or "",
+        "inner_base": int(inner_base or 10),
         "base_rtt_ms": row.get("base_rtt_ms"),
         "seeded_host_pins": seeded,
         "deploy_status": deploy.get("status"),
@@ -268,11 +353,14 @@ def main(argv=None) -> int:
     parser.add_argument("--hub-key", default="/etc/rahyaab/hub_key")
     parser.add_argument("--frontend-port", type=int, default=443)
     parser.add_argument("--protocol", default=DEFAULT_PROTOCOL)
+    parser.add_argument("--hub-tag", default="")
+    parser.add_argument("--inner-base", type=int, default=10)
     args = parser.parse_args(argv)
     summary = run_setup(
         args.iran_host, args.foreign_host, args.pair_id, args.pair_name,
         args.hub_db, args.hub_key, frontend_port=args.frontend_port,
-        protocol=args.protocol)
+        protocol=args.protocol, hub_tag=args.hub_tag,
+        inner_base=args.inner_base)
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

@@ -126,23 +126,62 @@ def dials_gre_underlay(pair: dict) -> bool:
 INNER_PROBED = ("GRE", "ESP")
 
 
-def carrier_iface(protocol: str, pair_id: int, namespace: str = "prod") -> str:
-    """The interface name a carrier owns: grep/espp plus pair id, plus 'b' for a benchmark carrier."""
+def pair_token(pair_id: int, tag: str = "") -> str:
+    """The pair token embedded in unit names and config paths.
+
+    Untagged (tag="") it is exactly today's `p{pair_id}`. A hub tag turns
+    pair 1 on hub A (`p1`) and pair 1 on hub B (`p1-a1b2`) into different
+    units, configs and certificates on a node shared by both masters, so a
+    second hub's deploy can never overwrite the first hub's. The tag is a
+    short hub id assigned at hub install; it is never a secret.
+    """
+    return f"p{pair_id}" if not tag else f"p{pair_id}-{tag}"
+
+
+def pair_tag(pair) -> str:
+    """The hub tag a pair was deployed with ("" for pre-multi-master pairs)."""
+    return (pair or {}).get("hub_tag") or ""
+
+
+def pair_base(pair) -> int:
+    """The inner base a pair was deployed with (10 reproduces today's scheme)."""
+    try:
+        return int((pair or {}).get("inner_base") or 10)
+    except (TypeError, ValueError):
+        return 10
+
+
+def carrier_iface(protocol: str, pair_id: int, namespace: str = "prod", tag: str = "") -> str:
+    """The interface name a carrier owns: grep/espp plus pair id, plus 'b' for a benchmark carrier.
+
+    The hub tag, when present, sits between the pair id and the bench
+    suffix (grep1a1b2, espp1a1b2b): two masters' pair 1 then own different
+    interfaces on a shared node instead of fighting over grep1/espp1.
+    """
     base = "grep" if protocol == "GRE" else "espp"
-    return f"{base}{pair_id}{'b' if namespace == 'bench' else ''}"
+    return f"{base}{pair_id}{tag}{'b' if namespace == 'bench' else ''}"
 
 
-def carrier_inner_pair(protocol: str, pair_id: int, namespace: str = "prod") -> tuple[str, str]:
-    """(local, peer) inner addresses of a carrier's /30 - GRE on 10.10/10.11, ESP on 10.12/10.13.
+def carrier_inner_pair(protocol: str, pair_id: int, namespace: str = "prod", base: int = 10) -> tuple[str, str]:
+    """(local, peer) inner addresses of a carrier's /30.
+
+    `base` is the hub's inner base: GRE prod on 10.{base}, ESP prod on
+    10.{base+2}, bench one higher each (10.{base+1} / 10.{base+3}). The
+    default base 10 reproduces today's GRE 10.10/10.11 and ESP 10.12/10.13
+    exactly. A second hub takes another base (20, 30, ...), so its pairs'
+    inners never overlap the first hub's on a node shared by both masters.
 
     Separate octets per carrier are load-bearing, not tidiness: a pair can hold a GRE underlay and an ESP
     underlay at the same time (protos 47 and 50 both arrive), and two interfaces claiming one address
     would make the routing decision, and therefore the measurement, depend on which unit started first.
+    The same holds across hubs, which is why the base exists at all.
     """
-    octet = "10.10" if protocol == "GRE" else "10.12"
+    if protocol == "GRE":
+        octet = f"10.{base}" if namespace != "bench" else f"10.{base + 1}"
+    else:
+        octet = f"10.{base + 2}" if namespace != "bench" else f"10.{base + 3}"
     idx = (pair_id % 200) + 10
     if namespace == "bench":
-        octet = "10.11" if protocol == "GRE" else "10.13"
         idx = ((pair_id + 50) % 200) + 10
     return f"{octet}.{idx}.1", f"{octet}.{idx}.2"
 
@@ -605,13 +644,14 @@ exit 0
 """
 
 
-def generate_gre(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, mtu: int = 1376, namespace: str = "prod") -> dict:
-    iface = carrier_iface("GRE", pair_id, namespace)
-    tun_ir, tun_fr = carrier_inner_pair("GRE", pair_id, namespace)
+def generate_gre(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, mtu: int = 1376, namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
+    iface = carrier_iface("GRE", pair_id, namespace, tag)
+    tun_ir, tun_fr = carrier_inner_pair("GRE", pair_id, namespace, base)
 
     cmt = generate_firewall_comment(f"{pair_id}-{namespace}", "GRE")
-    svc_name = f"best-tunnel-{namespace}-p{pair_id}-gre"
-    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-p{pair_id}.conf"
+    svc_name = f"best-tunnel-{namespace}-{ptok}-gre"
+    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-{ptok}.conf"
     sysctl_body = "net.ipv4.ip_forward = 1\n"
 
     # Measured on the live pair: the kernel keys a native GRE tunnel by its (remote, local) tuple, so a
@@ -844,7 +884,7 @@ def _esp_reqid(pair_id: int, namespace: str) -> int:
 
 
 def generate_esp(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0,
-                 namespace: str = "prod", mtu: int = ESP_MTU) -> dict:
+                 namespace: str = "prod", mtu: int = ESP_MTU, tag: str = "", base: int = 10) -> dict:
     """Manually keyed ESP (IP proto 50) carrier between the two hosts, as a route-based VTI link.
 
     `ir_ip`/`fr_ip` are the *public* addresses on both carriers - a carrier is what builds the underlay,
@@ -880,8 +920,9 @@ def generate_esp(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_
         with the inbound policy in place and the unscoped rule restored, Iran's direction fails again with
         that exact signature while the reverse direction keeps passing (scratch/ab_esp_dataplane_combo).
     """
-    iface = carrier_iface("ESP", pair_id, namespace)
-    tun_ir, tun_fr = carrier_inner_pair("ESP", pair_id, namespace)
+    ptok = pair_token(pair_id, tag)
+    iface = carrier_iface("ESP", pair_id, namespace, tag)
+    tun_ir, tun_fr = carrier_inner_pair("ESP", pair_id, namespace, base)
 
     reqid = _esp_reqid(pair_id, namespace)
     spi_ir2fr, spi_fr2ir = _esp_spi(pair_id, namespace, "iran"), _esp_spi(pair_id, namespace, "foreign")
@@ -889,12 +930,12 @@ def generate_esp(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_
     key_fr2ir = secrets.token_hex(ESP_KEY_BYTES)
 
     cmt = generate_firewall_comment(f"{pair_id}-{namespace}", "ESP")
-    svc_name = f"best-tunnel-{namespace}-p{pair_id}-esp"
-    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-p{pair_id}-esp.conf"
+    svc_name = f"best-tunnel-{namespace}-{ptok}-esp"
+    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-{ptok}-esp.conf"
     sysctl_body = "net.ipv4.ip_forward = 1\n"
     batch_dir = "/etc/best-tunnel/esp"
-    batch_ir = f"{batch_dir}/{namespace}-p{pair_id}-iran.batch"
-    batch_fr = f"{batch_dir}/{namespace}-p{pair_id}-foreign.batch"
+    batch_ir = f"{batch_dir}/{namespace}-{ptok}-iran.batch"
+    batch_fr = f"{batch_dir}/{namespace}-{ptok}-foreign.batch"
 
     # Both hosts install both SAs: each one transmits on its own and receives on the peer's. What differs
     # per host is the `dir out` policy, and it has to differ. A template resolves to a state by
@@ -1147,16 +1188,17 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 2. Backhaul-WSS Generator
 # ---------------------------------------------------------
-def generate_backhaul_wss(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 3080, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_backhaul_wss(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 3080, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     tok = rnd(32)
-    svc_ir = f"best-tunnel-{namespace}-p{pair_id}-backhaul-server"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-backhaul-client"
-    cfg_ir = f"/etc/best-tunnel/backhaul/{namespace}-server-p{pair_id}.toml"
-    cfg_fr = f"/etc/best-tunnel/backhaul/{namespace}-client-p{pair_id}.toml"
-    cert_path = f"/etc/best-tunnel/certs/backhaul-{namespace}-p{pair_id}-cert.pem"
-    key_path = f"/etc/best-tunnel/certs/backhaul-{namespace}-p{pair_id}-key.pem"
-    ca_path_fr = f"/etc/best-tunnel/certs/backhaul-{namespace}-p{pair_id}-ca.pem"
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-backhaul-server"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-backhaul-client"
+    cfg_ir = f"/etc/best-tunnel/backhaul/{namespace}-server-{ptok}.toml"
+    cfg_fr = f"/etc/best-tunnel/backhaul/{namespace}-client-{ptok}.toml"
+    cert_path = f"/etc/best-tunnel/certs/backhaul-{namespace}-{ptok}-cert.pem"
+    key_path = f"/etc/best-tunnel/certs/backhaul-{namespace}-{ptok}-key.pem"
+    ca_path_fr = f"/etc/best-tunnel/certs/backhaul-{namespace}-{ptok}-ca.pem"
     cert_pem, key_pem = generate_self_signed_cert(ir_ip)
 
     server_toml = f"""[server]
@@ -1230,14 +1272,15 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 3. Rathole-Noise Generator
 # ---------------------------------------------------------
-def generate_rathole_noise(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2443, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_rathole_noise(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2443, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     tok = rnd(32)
     server_priv, server_pub = generate_noise_keypair()
-    svc_ir = f"best-tunnel-{namespace}-p{pair_id}-rathole-server"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-rathole-client"
-    cfg_ir = f"/etc/best-tunnel/rathole/{namespace}-server-p{pair_id}.toml"
-    cfg_fr = f"/etc/best-tunnel/rathole/{namespace}-client-p{pair_id}.toml"
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-rathole-server"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-rathole-client"
+    cfg_ir = f"/etc/best-tunnel/rathole/{namespace}-server-{ptok}.toml"
+    cfg_fr = f"/etc/best-tunnel/rathole/{namespace}-client-{ptok}.toml"
 
     server_toml = f"""[server]
 bind_addr = "0.0.0.0:{transport_port}"
@@ -1306,17 +1349,18 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 4. Chisel-WSS Generator
 # ---------------------------------------------------------
-def generate_chisel_wss(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2095, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_chisel_wss(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2095, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
-    user = f"tun{pair_id}"
+    user = f"tun{pair_id}{('-' + tag) if tag else ''}"
     pwd = rnd(24)
-    svc_ir = f"best-tunnel-{namespace}-p{pair_id}-chisel-server"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-chisel-client"
-    cert_path = f"/etc/best-tunnel/certs/chisel-{namespace}-p{pair_id}-cert.pem"
-    key_path = f"/etc/best-tunnel/certs/chisel-{namespace}-p{pair_id}-key.pem"
-    ca_path_fr = f"/etc/best-tunnel/certs/chisel-{namespace}-p{pair_id}-ca.pem"
-    auth_path_ir = f"/etc/best-tunnel/chisel/{namespace}-auth-p{pair_id}.json"
-    env_path_fr = f"/etc/best-tunnel/chisel/{namespace}-env-p{pair_id}"
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-chisel-server"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-chisel-client"
+    cert_path = f"/etc/best-tunnel/certs/chisel-{namespace}-{ptok}-cert.pem"
+    key_path = f"/etc/best-tunnel/certs/chisel-{namespace}-{ptok}-key.pem"
+    ca_path_fr = f"/etc/best-tunnel/certs/chisel-{namespace}-{ptok}-ca.pem"
+    auth_path_ir = f"/etc/best-tunnel/chisel/{namespace}-auth-{ptok}.json"
+    env_path_fr = f"/etc/best-tunnel/chisel/{namespace}-env-{ptok}"
     # chisel resolves `--auth` from the AUTH environment variable when the flag is absent
     # (verified in chisel v1.10.1 help text). Passing it on ExecStart instead would leak the
     # credential: systemd expands ${VAR} into argv, so it is readable via /proc/*/cmdline.
@@ -1381,16 +1425,17 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 5. FRP-TLS Generator
 # ---------------------------------------------------------
-def generate_frp_tls(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 7000, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_frp_tls(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 7000, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     tok = rnd(32)
-    svc_ir = f"best-tunnel-{namespace}-p{pair_id}-frps"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-frpc"
-    cfg_ir = f"/etc/best-tunnel/frp/{namespace}-frps-p{pair_id}.toml"
-    cfg_fr = f"/etc/best-tunnel/frp/{namespace}-frpc-p{pair_id}.toml"
-    cert_path_ir = f"/etc/best-tunnel/certs/frp-{namespace}-p{pair_id}-cert.pem"
-    key_path_ir = f"/etc/best-tunnel/certs/frp-{namespace}-p{pair_id}-key.pem"
-    ca_path_fr = f"/etc/best-tunnel/certs/frp-{namespace}-p{pair_id}-ca.pem"
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-frps"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-frpc"
+    cfg_ir = f"/etc/best-tunnel/frp/{namespace}-frps-{ptok}.toml"
+    cfg_fr = f"/etc/best-tunnel/frp/{namespace}-frpc-{ptok}.toml"
+    cert_path_ir = f"/etc/best-tunnel/certs/frp-{namespace}-{ptok}-cert.pem"
+    key_path_ir = f"/etc/best-tunnel/certs/frp-{namespace}-{ptok}-key.pem"
+    ca_path_fr = f"/etc/best-tunnel/certs/frp-{namespace}-{ptok}-ca.pem"
     cert_pem, key_pem = generate_self_signed_cert(ir_ip)
 
     frps_toml = f"""bindPort = {transport_port}
@@ -1467,17 +1512,18 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 6. Wstunnel-v10 Generator
 # ---------------------------------------------------------
-def generate_wstunnel_v10(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2096, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_wstunnel_v10(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2096, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     secret_path = rnd(16)
-    svc_ir = f"best-tunnel-{namespace}-p{pair_id}-wstunnel-server"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-wstunnel-client"
-    cert_path = f"/etc/best-tunnel/certs/wstunnel-{namespace}-p{pair_id}-cert.pem"
-    key_path = f"/etc/best-tunnel/certs/wstunnel-{namespace}-p{pair_id}-key.pem"
-    ca_path = f"/etc/best-tunnel/certs/wstunnel-{namespace}-p{pair_id}-ca.pem"
-    env_path_ir = f"/etc/best-tunnel/wstunnel/{namespace}-env-p{pair_id}"
-    env_path_fr = f"/etc/best-tunnel/wstunnel/{namespace}-env-p{pair_id}"
-    ca_pem, cert_pem, key_pem = generate_ca_leaf_pair(ir_ip, f"wstunnel p{pair_id} {namespace}")
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-wstunnel-server"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-wstunnel-client"
+    cert_path = f"/etc/best-tunnel/certs/wstunnel-{namespace}-{ptok}-cert.pem"
+    key_path = f"/etc/best-tunnel/certs/wstunnel-{namespace}-{ptok}-key.pem"
+    ca_path = f"/etc/best-tunnel/certs/wstunnel-{namespace}-{ptok}-ca.pem"
+    env_path_ir = f"/etc/best-tunnel/wstunnel/{namespace}-env-{ptok}"
+    env_path_fr = f"/etc/best-tunnel/wstunnel/{namespace}-env-{ptok}"
+    ca_pem, cert_pem, key_pem = generate_ca_leaf_pair(ir_ip, f"wstunnel {ptok} {namespace}")
     # wstunnel reads its own WSTUNNEL_* environment variables natively (verified against the
     # v10.1.7 binary). Keeping the secret path out of ExecStart matters because systemd expands
     # ${VAR} into argv, which is world-readable through /proc/*/cmdline.
@@ -1540,15 +1586,16 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 7. Xray-Reverse Dual-Instance Generator
 # ---------------------------------------------------------
-def generate_xray_reverse(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = None, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_xray_reverse(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = None, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     tunnel_uuid = str(uuid.uuid4())
     secret_tag = rnd(12)
     inter_port = transport_port if transport_port else (2080 + (pair_id % 100))
-    svc_portal = f"best-tunnel-{namespace}-p{pair_id}-xray-portal"
-    svc_bridge = f"best-tunnel-{namespace}-p{pair_id}-xray-bridge"
-    cfg_portal = f"/etc/best-tunnel/xray/{namespace}-portal-p{pair_id}.json"
-    cfg_bridge = f"/etc/best-tunnel/xray/{namespace}-bridge-p{pair_id}.json"
+    svc_portal = f"best-tunnel-{namespace}-{ptok}-xray-portal"
+    svc_bridge = f"best-tunnel-{namespace}-{ptok}-xray-bridge"
+    cfg_portal = f"/etc/best-tunnel/xray/{namespace}-portal-{ptok}.json"
+    cfg_bridge = f"/etc/best-tunnel/xray/{namespace}-bridge-{ptok}.json"
 
     portal_json = f"""{{
   "log": {{"loglevel": "info"}},
@@ -1649,13 +1696,14 @@ WantedBy=multi-user.target
 # ---------------------------------------------------------
 # 8. KCP-FEC (kcptun with Reed-Solomon Error Correction)
 # ---------------------------------------------------------
-def generate_kcptun(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 4090, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_kcptun(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 4090, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     key = rnd(32)
-    svc_server = f"best-tunnel-{namespace}-p{pair_id}-kcptun-server"
-    svc_client = f"best-tunnel-{namespace}-p{pair_id}-kcptun-client"
-    cfg_server = f"/etc/best-tunnel/kcptun/{namespace}-server-p{pair_id}.json"
-    cfg_client = f"/etc/best-tunnel/kcptun/{namespace}-client-p{pair_id}.json"
+    svc_server = f"best-tunnel-{namespace}-{ptok}-kcptun-server"
+    svc_client = f"best-tunnel-{namespace}-{ptok}-kcptun-client"
+    cfg_server = f"/etc/best-tunnel/kcptun/{namespace}-server-{ptok}.json"
+    cfg_client = f"/etc/best-tunnel/kcptun/{namespace}-client-{ptok}.json"
 
     server_json = f"""{{
   "listen": ":{transport_port}",
@@ -1790,7 +1838,7 @@ def _generate_hy2_cert(sni: str, dial_ip: str) -> tuple[str, str, str]:
     return cert_pem, key_pem, pin
 
 
-def generate_hysteria2(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2444, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_hysteria2(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 2444, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
     """Hysteria2 over QUIC: server on Foreign, client on Iran.
 
     The direction follows the product's reverse convention in the sense
@@ -1803,18 +1851,19 @@ def generate_hysteria2(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, tran
     obfuscation is always on (a HY2 server without it is just HTTP/3),
     and TLS is pinned two ways (pinSHA256 + ca) - never insecure.
     """
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     auth = rnd(32)
     obfs = rnd(32)
-    sni = f"hy2-p{pair_id}.local"
+    sni = f"hy2-{ptok}.local"
     cert_pem, key_pem, pin = _generate_hy2_cert(sni, fr_ip)
-    svc_ir = f"best-tunnel-{namespace}-p{pair_id}-hysteria2-client"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-hysteria2-server"
-    cfg_ir = f"/etc/best-tunnel/hysteria2/{namespace}-client-p{pair_id}.yaml"
-    cfg_fr = f"/etc/best-tunnel/hysteria2/{namespace}-server-p{pair_id}.yaml"
-    ca_ir = f"/etc/best-tunnel/hysteria2/{namespace}-ca-p{pair_id}.pem"
-    cert_fr = f"/etc/best-tunnel/hysteria2/{namespace}-cert-p{pair_id}.pem"
-    key_fr = f"/etc/best-tunnel/hysteria2/{namespace}-key-p{pair_id}.pem"
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-hysteria2-client"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-hysteria2-server"
+    cfg_ir = f"/etc/best-tunnel/hysteria2/{namespace}-client-{ptok}.yaml"
+    cfg_fr = f"/etc/best-tunnel/hysteria2/{namespace}-server-{ptok}.yaml"
+    ca_ir = f"/etc/best-tunnel/hysteria2/{namespace}-ca-{ptok}.pem"
+    cert_fr = f"/etc/best-tunnel/hysteria2/{namespace}-cert-{ptok}.pem"
+    key_fr = f"/etc/best-tunnel/hysteria2/{namespace}-key-{ptok}.pem"
 
     server_yaml = f"""listen: {fr_ip}:{transport_port}
 auth:
@@ -2114,7 +2163,7 @@ class SingBoxAdapter:
     def generate_vless_reality(cls, pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
                                transport_port: int = 2090,
                                server_name: str = "",
-                               namespace: str = "prod") -> dict:
+                               namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
         """Generates VLESS + REALITY sing-box configuration with chrome uTLS fingerprint and REALITY
         handshake camouflage.
 
@@ -2123,14 +2172,15 @@ class SingBoxAdapter:
         means "use the pool". A non-empty one is an operator override, syntax-checked only - whether
         the name is actually reachable is a live fact that the cover precheck measures.
         """
+        ptok = pair_token(pair_id, tag)
         cover = select_reality_cover(pair_id, server_name)
         vless_uuid = str(uuid.uuid4())
         priv_key, pub_key, short_id = cls.generate_reality_keys()
 
-        svc_server = f"best-tunnel-{namespace}-p{pair_id}-singbox-vless-server"
-        svc_client = f"best-tunnel-{namespace}-p{pair_id}-singbox-vless-client"
-        cfg_server = f"/etc/best-tunnel/sing-box/{namespace}-vless-server-p{pair_id}.json"
-        cfg_client = f"/etc/best-tunnel/sing-box/{namespace}-vless-client-p{pair_id}.json"
+        svc_server = f"best-tunnel-{namespace}-{ptok}-singbox-vless-server"
+        svc_client = f"best-tunnel-{namespace}-{ptok}-singbox-vless-client"
+        cfg_server = f"/etc/best-tunnel/sing-box/{namespace}-vless-server-{ptok}.json"
+        cfg_client = f"/etc/best-tunnel/sing-box/{namespace}-vless-client-{ptok}.json"
 
         server_dict = {
             "log": {"level": "info"},
@@ -2282,14 +2332,15 @@ WantedBy=multi-user.target
     def generate_shadowsocks_2022(cls, pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
                                  transport_port: int = 8388,
                                  method: str = "2022-blake3-aes-128-gcm",
-                                 namespace: str = "prod") -> dict:
+                                 namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
         """Generates Shadowsocks-2022 sing-box configuration with BLAKE3 key derivation."""
+        ptok = pair_token(pair_id, tag)
         ss_key = cls.generate_shadowsocks_key(method)
 
-        svc_server = f"best-tunnel-{namespace}-p{pair_id}-singbox-ss-server"
-        svc_client = f"best-tunnel-{namespace}-p{pair_id}-singbox-ss-client"
-        cfg_server = f"/etc/best-tunnel/sing-box/{namespace}-ss-server-p{pair_id}.json"
-        cfg_client = f"/etc/best-tunnel/sing-box/{namespace}-ss-client-p{pair_id}.json"
+        svc_server = f"best-tunnel-{namespace}-{ptok}-singbox-ss-server"
+        svc_client = f"best-tunnel-{namespace}-{ptok}-singbox-ss-client"
+        cfg_server = f"/etc/best-tunnel/sing-box/{namespace}-ss-server-{ptok}.json"
+        cfg_client = f"/etc/best-tunnel/sing-box/{namespace}-ss-client-{ptok}.json"
 
         server_dict = {
             "log": {"level": "info"},
@@ -2561,21 +2612,22 @@ exec /usr/local/bin/headless-bale-joiner --join-link "$(cat "$LINK_FILE")" --soc
 '''
 
 
-def generate_bale_webrtc(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_bale_webrtc(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     socks_port = (10800 if namespace == "prod" else 12800) + pair_id
-    user = f"tun{pair_id}"
+    user = f"tun{pair_id}{('-' + tag) if tag else ''}"
     pwd = rnd(24)
-    svc_ir_join = f"best-tunnel-{namespace}-p{pair_id}-bale-joiner"
-    svc_ir_fwd = f"best-tunnel-{namespace}-p{pair_id}-bale-forward"
-    svc_fr = f"best-tunnel-{namespace}-p{pair_id}-bale-creator"
+    svc_ir_join = f"best-tunnel-{namespace}-{ptok}-bale-joiner"
+    svc_ir_fwd = f"best-tunnel-{namespace}-{ptok}-bale-forward"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-bale-creator"
     bale_dir = "/etc/best-tunnel/bale"
-    link_path = f"{bale_dir}/{namespace}-link-p{pair_id}.txt"
-    cookies_path = f"{bale_dir}/{namespace}-cookies-p{pair_id}.json"
-    creds_path = f"{bale_dir}/{namespace}-creds-p{pair_id}"
-    call_path = f"/var/run/whitelist-bypass/call-{namespace}-p{pair_id}.txt"
-    wrapper_path = f"/usr/local/bin/best-bale-joiner-p{pair_id}-{namespace}.sh"
-    forward_path = f"/usr/local/bin/best-bale-forward-p{pair_id}-{namespace}.py"
+    link_path = f"{bale_dir}/{namespace}-link-{ptok}.txt"
+    cookies_path = f"{bale_dir}/{namespace}-cookies-{ptok}.json"
+    creds_path = f"{bale_dir}/{namespace}-creds-{ptok}"
+    call_path = f"/var/run/whitelist-bypass/call-{namespace}-{ptok}.txt"
+    wrapper_path = f"/usr/local/bin/best-bale-joiner-{ptok}-{namespace}.sh"
+    forward_path = f"/usr/local/bin/best-bale-forward-{ptok}-{namespace}.py"
     forward_src = (_BALE_FORWARD_TEMPLATE
                    .replace("__FRONTEND__", str(frontend))
                    .replace("__BACKEND__", str(backend))
@@ -2820,26 +2872,27 @@ main()
 '''
 
 
-def generate_spoof_wireguard(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0, namespace: str = "prod", backend_port: int = None) -> dict:
+def generate_spoof_wireguard(pair_id: int, ir_ip: str, fr_ip: str, frontend: int, transport_port: int = 0, namespace: str = "prod", backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    ptok = pair_token(pair_id, tag)
     backend = int(backend_port) if backend_port else frontend
     idx = (pair_id % 200) + 10
-    octet = "10.14" if namespace == "prod" else "10.15"
+    octet = f"10.{base + 4}" if namespace == "prod" else f"10.{base + 5}"
     tun_ir, tun_fr = f"{octet}.{idx}.1", f"{octet}.{idx}.2"
     pipe_port = (51800 if namespace == "prod" else 52800) + pair_id
     wg_port = (51900 if namespace == "prod" else 52900) + pair_id
-    iface = f"spoofwg{pair_id}{'b' if namespace == 'bench' else ''}"
-    svc_ir_pipe = f"best-tunnel-{namespace}-p{pair_id}-spoof-pipe"
-    svc_ir_fwd = f"best-tunnel-{namespace}-p{pair_id}-spoof-forward"
-    svc_fr_pipe = f"best-tunnel-{namespace}-p{pair_id}-spoof-pipe"
+    iface = f"spoofwg{pair_id}{tag}{'b' if namespace == 'bench' else ''}"
+    svc_ir_pipe = f"best-tunnel-{namespace}-{ptok}-spoof-pipe"
+    svc_ir_fwd = f"best-tunnel-{namespace}-{ptok}-spoof-forward"
+    svc_fr_pipe = f"best-tunnel-{namespace}-{ptok}-spoof-pipe"
     spoof_dir = "/etc/best-tunnel/spoof"
-    ips_path = f"{spoof_dir}/{namespace}-ips-p{pair_id}.txt"
-    ir_key_path = f"{spoof_dir}/{namespace}-key-p{pair_id}-iran"
-    fr_key_path = f"{spoof_dir}/{namespace}-key-p{pair_id}-foreign"
+    ips_path = f"{spoof_dir}/{namespace}-ips-{ptok}.txt"
+    ir_key_path = f"{spoof_dir}/{namespace}-key-{ptok}-iran"
+    fr_key_path = f"{spoof_dir}/{namespace}-key-{ptok}-foreign"
     ir_priv, ir_pub = generate_noise_keypair()
     fr_priv, fr_pub = generate_noise_keypair()
-    pipe_ir_path = f"/usr/local/bin/best-spoof-pipe-p{pair_id}-{namespace}-iran.py"
-    pipe_fr_path = f"/usr/local/bin/best-spoof-pipe-p{pair_id}-{namespace}-foreign.py"
-    forward_path = f"/usr/local/bin/best-spoof-forward-p{pair_id}-{namespace}.py"
+    pipe_ir_path = f"/usr/local/bin/best-spoof-pipe-{ptok}-{namespace}-iran.py"
+    pipe_fr_path = f"/usr/local/bin/best-spoof-pipe-{ptok}-{namespace}-foreign.py"
+    forward_path = f"/usr/local/bin/best-spoof-forward-{ptok}-{namespace}.py"
 
     def pipe_src(peer_ip):
         return (_SPOOF_PIPE_TEMPLATE
@@ -3323,7 +3376,7 @@ def _validate_plan_configs(plan: dict, protocol: str, namespace: str) -> dict:
 
 
 def generate_deployment(protocol: str, pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
-                        backend_port: int = None) -> dict:
+                        backend_port: int = None, tag: str = "", base: int = 10) -> dict:
     """Build the production plan for one transport, and name the port its traffic is delivered to.
 
     `backend_port` is the second end of the tunnel: the port on the peer host that must answer. Left unset
@@ -3339,13 +3392,14 @@ def generate_deployment(protocol: str, pair_id: int, ir_ip: str, fr_ip: str, fro
     refusal = backend_port_refusal(protocol, frontend, backend_port)
     if refusal:
         raise ValueError(refusal)
-    kwargs = {"namespace": "prod"}
+    kwargs = {"namespace": "prod", "tag": tag, "base": base}
     if protocol in BACKEND_PORT_DECLARABLE:
         kwargs["backend_port"] = backend_port
     return _validate_plan_configs(gen(pair_id, ir_ip, fr_ip, frontend, **kwargs), protocol, "prod")
 
 def generate_benchmark_plan(protocol: str, pair_id: int, ir_ip: str, fr_ip: str,
-                            test_frontend: int = 8898, test_transport: int = 8897) -> dict:
+                            test_frontend: int = 8898, test_transport: int = 8897,
+                            tag: str = "", base: int = 10) -> dict:
     """Generates an isolated, non-colliding test deployment specifically for running ladder benchmarks.
 
     No `backend_port` is threaded through on purpose: the benchmark starts its own HTTP backend on the peer
@@ -3358,9 +3412,9 @@ def generate_benchmark_plan(protocol: str, pair_id: int, ir_ip: str, fr_ip: str,
     if not gen:
         raise ValueError(f"Unknown protocol for benchmark: {protocol}")
     if protocol == "GRE":
-        plan = gen(pair_id, ir_ip, fr_ip, test_frontend, namespace="bench")
+        plan = gen(pair_id, ir_ip, fr_ip, test_frontend, namespace="bench", tag=tag, base=base)
     else:
-        plan = gen(pair_id, ir_ip, fr_ip, test_frontend, transport_port=test_transport, namespace="bench")
+        plan = gen(pair_id, ir_ip, fr_ip, test_frontend, transport_port=test_transport, namespace="bench", tag=tag, base=base)
 
     # Hardening: cap the lifetime of ephemeral benchmark units. `Type=oneshot` ignores RuntimeMaxSec
     # outright - both live hosts logged "RuntimeMaxSec= has no effect in combination with

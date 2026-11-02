@@ -40,7 +40,7 @@ class _Fakes:
         self.deployed.append(protocol)
         return {"status": "ACTIVE-%s" % protocol}
 
-    def install_fn(self, *args):
+    def install_fn(self, *args, **kwargs):
         self.installed.append(args[5])
         return {"active": "active", "heartbeat": {"active_tunnel": args[5]}}
 
@@ -53,9 +53,10 @@ def _run(fakes, protocol="GRE"):
         "192.0.2.10", "198.51.100.20", 4, "pair", "/tmp/hub.db",
         "/etc/rahyaab/hub_key", frontend_port=45984, protocol=protocol,
         known_hosts_path="/nonexistent-known-hosts",
-        pin_fn=lambda *a: None, ensure_fn=lambda *a: None,
+        pin_fn=lambda *a: None, ensure_fn=lambda *a, **k: None,
         measure_fn=fakes.measure_fn, deploy_fn=fakes.deploy_fn,
-        install_fn=fakes.install_fn, record_fn=fakes.record_fn)
+        install_fn=fakes.install_fn, record_fn=fakes.record_fn,
+        preflight=False)
 
 
 def test_first_choice_succeeds_without_fallback():

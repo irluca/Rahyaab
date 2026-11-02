@@ -26,13 +26,18 @@ from hub.store import Store  # noqa: E402
 DEFAULT_INNER_BASE = 11
 
 
-def next_inner_pair(store: Store) -> tuple[str, str]:
-    """First free 10.10.N.1 / 10.10.N.2 pair, N starting at 11."""
+def next_inner_pair(store: Store, base: int = 10) -> tuple[str, str]:
+    """First free 10.{base}.N.1 / 10.{base}.N.2 pair, N starting at 11.
+
+    The hub record's inners are display and sweep-fallback dial hosts,
+    but they must still live in this hub's own /16: a second hub's
+    record starting at 10.10.11 would otherwise shadow the first hub's.
+    """
     used = set()
     for pair in store.list_pairs():
         inner = pair.get("inner_iran") or ""
         parts = inner.split(".")
-        if len(parts) == 4 and parts[0] == "10" and parts[1] == "10":
+        if len(parts) == 4 and parts[0] == "10" and parts[1] == str(base):
             try:
                 used.add(int(parts[2]))
             except ValueError:
@@ -40,7 +45,7 @@ def next_inner_pair(store: Store) -> tuple[str, str]:
     n = DEFAULT_INNER_BASE
     while n in used:
         n += 1
-    return f"10.10.{n}.1", f"10.10.{n}.2"
+    return f"10.{base}.{n}.1", f"10.{base}.{n}.2"
 
 
 def _find_or_create_server(store: Store, name: str, host: str) -> dict:

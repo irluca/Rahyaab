@@ -215,9 +215,10 @@ def test_full_setup_handler_calls_wizard_chain(tmp_path, monkeypatch):
     class FakeWizard:
         @staticmethod
         def run_setup(iran, foreign, pid, name, db, key, frontend_port=443,
-                      protocol="GRE"):
+                      protocol="GRE", hub_tag="", inner_base=10):
             calls.update({"iran": iran, "foreign": foreign, "pid": pid,
-                          "db": db, "key": key, "protocol": protocol})
+                          "db": db, "key": key, "protocol": protocol,
+                          "hub_tag": hub_tag, "inner_base": inner_base})
             return {"protocol": "GRE", "score": 99.9, "deploy_status": "ACTIVE",
                     "healer_active": "active", "healer_heartbeat": {}}
 
@@ -250,7 +251,7 @@ def test_full_setup_handler_requeues_on_transient_failure(tmp_path, monkeypatch)
     class FailingWizard:
         @staticmethod
         def run_setup(iran, foreign, pid, name, db, key, frontend_port=443,
-                      protocol="GRE"):
+                      protocol="GRE", hub_tag="", inner_base=10):
             raise RuntimeError(
                 "Protocol GRE did not measure cleanly: [\"Execution error: "
                 "TransientTransportError: ('SSH transport to 203.0.113.20 failed "
@@ -291,7 +292,7 @@ def test_full_setup_handler_does_not_requeue_after_two_retries(tmp_path, monkeyp
     class FailingWizard:
         @staticmethod
         def run_setup(iran, foreign, pid, name, db, key, frontend_port=443,
-                      protocol="GRE"):
+                      protocol="GRE", hub_tag="", inner_base=10):
             raise RuntimeError("TransientTransportError: boom")
 
     monkeypatch.setitem(sys.modules, "wizard_setup", FailingWizard)

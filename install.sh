@@ -39,7 +39,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.5.4"
+VERSION="1.6.0"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
@@ -164,6 +164,9 @@ Options:
   --iran-host IP      Hub server IP for full-setup (default: auto-detected)
   --pair-name NAME    Pair name for full-setup (default: $PAIR_NAME)
   --protocol PROTO    First-tunnel protocol for full-setup (default: GRE)
+  --inner-base N      Inner address base for this hub (default: 20; the first hub
+                      uses 10. Each additional hub needs its own even base: 20, 30, ...
+                      so its pairs never share inner addresses with another hub's)
   --node-user USER    Node user for push-key (default: root)
   --node-port PORT    Node SSH port for push-key (default: 22)
   --bbr               Enable BBR
@@ -193,6 +196,7 @@ parse_args() {
             --iran-host) IRAN_HOST="$2"; shift 2 ;;
             --pair-name) PAIR_NAME="$2"; shift 2 ;;
             --protocol) PROTOCOL="$2"; shift 2 ;;
+            --inner-base) INNER_BASE="$2"; shift 2 ;;
             --node-user) NODE_USER="$2"; shift 2 ;;
             --node-port) NODE_PORT="$2"; shift 2 ;;
             --domain)   DOMAIN="$2"; shift 2 ;;
@@ -215,6 +219,14 @@ parse_args() {
     case "$ROLE" in ""|hub|node|master) ;; *) die "Invalid role: $ROLE (hub, node, or master)" ;; esac
     if [ -n "$DOMAIN" ] && [ -z "$EMAIL" ]; then
         die "--email is also required for a domain certificate"
+    fi
+    if [ -n "$INNER_BASE" ]; then
+        case "$INNER_BASE" in
+            ''|*[!0-9]*) die "--inner-base must be a number (20, 30, ...)" ;;
+        esac
+        if [ "$((INNER_BASE % 2))" -ne 0 ] || [ "$INNER_BASE" -lt 12 ] || [ "$INNER_BASE" -gt 250 ]; then
+            die "--inner-base must be an even number between 12 and 250 (10 belongs to the first hub)"
+        fi
     fi
     if { [ -n "$CERT_PATH" ] || [ -n "$KEY_PATH" ]; } && { [ -z "$CERT_PATH" ] || [ -z "$KEY_PATH" ]; }; then
         die "--cert and --key must be given together"
@@ -629,6 +641,47 @@ pin_self_host_key() { # Pin this host's own key into root known_hosts
     fi
 }
 
+# Multi-master identity: a hub's short tag and inner base, stored in
+# hub.db settings and read by the hub on every join. Seeded only when
+# absent, so an update never rewrites an existing hub's identity. A hub
+# that already has pairs keeps the legacy identity (no tag, base 10) so
+# its live pairs keep their names and inners; a fresh hub gets a random
+# tag and the requested (or default 20) base, so its pairs can share
+# nodes with the first hub without colliding.
+seed_hub_identity() {
+    local tag base
+    tag="$(openssl rand -hex 2 2>/dev/null || echo "")"
+    [ -n "$tag" ] || die "Could not generate a hub tag (openssl failed)"
+    base="${INNER_BASE:-20}"
+    HUB_TAG_SEED="$tag" HUB_BASE_SEED="$base" python3 - <<'PYEOF'
+import os
+import sqlite3
+db = "/var/lib/rahyaab/hub.db"
+tag = os.environ.get("HUB_TAG_SEED") or ""
+try:
+    base = int(os.environ.get("HUB_BASE_SEED") or 20)
+except ValueError:
+    base = 20
+conn = sqlite3.connect(db)
+try:
+    conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    have = {r[0] for r in conn.execute("SELECT key FROM settings")}
+    try:
+        pairs = conn.execute("SELECT COUNT(*) FROM pairs").fetchone()[0]
+    except sqlite3.Error:
+        pairs = 0
+    if "hub_tag" not in have:
+        conn.execute("INSERT INTO settings (key, value) VALUES ('hub_tag', ?)",
+                     ("" if pairs else tag,))
+    if "inner_base" not in have:
+        conn.execute("INSERT INTO settings (key, value) VALUES ('inner_base', ?)",
+                     (str(10 if pairs else base),))
+    conn.commit()
+finally:
+    conn.close()
+PYEOF
+}
+
 install_hub() {
     step "Installing the hub (dashboard)"
     install_deps hub
@@ -641,6 +694,7 @@ install_hub() {
     # needs an explicit restart so the fresh code and settings actually come up
     systemctl restart "$UNIT"
     hub_health http
+    seed_hub_identity
     firewall_open_8890
     ok "Hub installed; for now it is only reachable on this server (127.0.0.1)"
     warn "To open it to the internet, choose 'Web Panel' from the menu and set a certificate (domain or IP)"

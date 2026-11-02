@@ -193,7 +193,8 @@ def run_manual_switch(monitor, request: dict, result_path: str = RESULT_PATH) ->
                     protocols.dial_address(pair["iran"], target),
                     protocols.dial_address(pair["foreign"], target),
                     int(new_port) if port_change else current_frontend,
-                    backend_port=pair.get("backend_port") or None)
+                    backend_port=pair.get("backend_port") or None,
+                    tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
             except Exception as exc:
                 result.update(status="failed",
                               detail="cannot plan %s: %s" % (target, exc))

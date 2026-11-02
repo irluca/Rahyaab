@@ -329,7 +329,9 @@ def join_node(store, body: dict, source_ip: str,
             break
     if pair is None:
         from hub.wizard import next_inner_pair
-        inner_iran, inner_foreign = next_inner_pair(store)
+        identity = store.get_hub_identity()
+        inner_iran, inner_foreign = next_inner_pair(
+            store, base=identity["inner_base"])
         if not store.list_pairs():
             pair_name = DEFAULT_PAIR_NAME
         else:
@@ -353,6 +355,7 @@ def join_node(store, body: dict, source_ip: str,
         })
     job = None
     if not (pair.get("current_protocol") or "").strip():
+        identity = store.get_hub_identity()
         job = store.create_job("full_setup", pair["id"], {
             "iran_host": master["host"],
             "foreign_host": node["host"],
@@ -360,6 +363,8 @@ def join_node(store, body: dict, source_ip: str,
             "hub_key_path": hub_key,
             "frontend_port": pair.get("frontend_port") or 443,
             "protocol": "GRE",
+            "hub_tag": identity["hub_tag"],
+            "inner_base": identity["inner_base"],
         })
     store.log_event("node_join", "Node %s joined from %s" % (name, source_ip),
                     pair_id=pair["id"], server_id=node["id"])

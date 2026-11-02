@@ -62,7 +62,7 @@ class TunnelHealthChecker:
         # 1. Fetch deployment plan to locate active systemd units. Deliberately generated without the pair's
         # declared backend port: a health check names the units to interrogate, and a refusal raised here
         # would turn an inconsistent declaration into an ERROR sample instead of a measurement.
-        plan = protocols.generate_deployment(active_protocol, pair_id, ir_ip, fr_ip, frontend)
+        plan = protocols.generate_deployment(active_protocol, pair_id, ir_ip, fr_ip, frontend, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
         ir_units = plan.get("iran_units", [])
         fr_units = plan.get("foreign_units", [])
 
@@ -107,8 +107,8 @@ class TunnelHealthChecker:
         # on the pair is riding on.
         loss_val, lat_val, lat_sampled = 100.0, 999.0, False
         if is_carrier:
-            iface = protocols.carrier_iface(active_protocol, pair_id, "prod")
-            peer_inner = protocols.carrier_inner_pair(active_protocol, pair_id, "prod")[1]
+            iface = protocols.carrier_iface(active_protocol, pair_id, "prod", protocols.pair_tag(pair))
+            peer_inner = protocols.carrier_inner_pair(active_protocol, pair_id, "prod", protocols.pair_base(pair))[1]
             instrument = f"inner ICMP via {iface} to {peer_inner}"
             _, o_ping, _ = ir_runner.run(f"ping -c 10 -i 0.2 -W 1 -I {iface} {peer_inner}",
                                          best_effort=True, timeout=25, retryable=True)
@@ -608,7 +608,7 @@ class FailoverManager:
                 protocol, pair_id,
                 protocols.dial_address(pair["iran"], protocol),
                 protocols.dial_address(pair["foreign"], protocol),
-                frontend, backend_port=backend_port)
+                frontend, backend_port=backend_port, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
 
         # The carrier gate is the same single function the benchmark and the deploy path consult.
         # A switchover writes configs and starts units directly, without ever calling
@@ -736,7 +736,7 @@ class FailoverManager:
                 for role, r, local, remote in (("iran", ir_runner, ir_ip_t, fr_ip_t),
                                                ("foreign", fr_runner, fr_ip_t, ir_ip_t)):
                     blocked_vti = engine.carrier_vti_conflict(
-                        r, role, local, remote, protocols.carrier_iface("ESP", pair_id, "prod"))
+                        r, role, local, remote, protocols.carrier_iface("ESP", pair_id, "prod", protocols.pair_tag(pair)))
                     if blocked_vti:
                         # The audit record has to say which of the two refusals fired. Logging a conflict
                         # when the read simply failed would put an unobserved fact in the permanent log, and
@@ -885,12 +885,12 @@ class FailoverManager:
                     # reports "no round trip" for a tunnel that is carrying traffic fine, so a switchover
                     # *to* a carrier was refused by a test it could not pass. Inner ICMP is the verdict
                     # engine.deploy_tunnel uses for the same shape, reused here rather than paraphrased.
-                    reached, o_ping = engine.carrier_inner_reachable(ir_runner, target_protocol, pair_id)
+                    reached, o_ping = engine.carrier_inner_reachable(ir_runner, target_protocol, pair_id, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
                     if not reached:
                         smoke_ok = False
-                        peer = protocols.carrier_inner_pair(target_protocol, pair_id, "prod")[1]
+                        peer = protocols.carrier_inner_pair(target_protocol, pair_id, "prod", protocols.pair_base(pair))[1]
                         smoke_detail = (f"no inner reply on {peer} via "
-                                        f"{protocols.carrier_iface(target_protocol, pair_id, 'prod')} "
+                                        f"{protocols.carrier_iface(target_protocol, pair_id, 'prod', protocols.pair_tag(pair))} "
                                         f"(ping: {o_ping[:60]!r})")
                 elif not probe.ensure_probe(ir_runner):
                     smoke_ok = False
@@ -948,7 +948,7 @@ class FailoverManager:
             self.record_failover_event(pair_id)
             storage.update_pair_status(pair_id, status="ACTIVE", active_tunnel=target_protocol)
             # Only now: the declaration describes a carrier that has been verified to be carrying.
-            engine.declare_carrier(pair_id, target_protocol, dry_run)
+            engine.declare_carrier(pair_id, target_protocol, dry_run, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
             storage.log_audit(
                 pair_id, "FAILOVER", "SUCCESS",
                 f"Successfully failed over {current_protocol} -> {target_protocol} in {duration_ms}ms. Trigger: {reason}"
@@ -1055,16 +1055,16 @@ class FailoverManager:
             check = add.replace("-A PREROUTING", "-C PREROUTING", 1)
             ir_runner.run(f"{check} || {add}", best_effort=True)
         self._manifest_set_dnat(ir_runner, carrier_plan, target_protocol, pair_id, keep=True)
-        reached, _ = engine.carrier_inner_reachable(ir_runner, target_protocol, pair_id)
+        reached, _ = engine.carrier_inner_reachable(ir_runner, target_protocol, pair_id, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
         _, o_nat, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True)
-        inner_peer = protocols.carrier_inner_pair(target_protocol, pair_id, "prod")[1]
+        inner_peer = protocols.carrier_inner_pair(target_protocol, pair_id, "prod", protocols.pair_base(pair))[1]
         dnat_in_force = f"--to-destination {inner_peer}:{frontend}" in o_nat
         if not reached or not dnat_in_force:
             return None
         duration_ms = round((time.time() - t_start) * 1000.0, 1)
         self.record_failover_event(pair_id)
         storage.update_pair_status(pair_id, status="ACTIVE", active_tunnel=target_protocol)
-        engine.declare_carrier(pair_id, target_protocol, dry_run)
+        engine.declare_carrier(pair_id, target_protocol, dry_run, tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
         storage.log_audit(
             pair_id, "FAILOVER", "SUCCESS",
             f"Successfully failed over {current_protocol} -> {target_protocol} in {duration_ms}ms. "
@@ -1189,7 +1189,7 @@ class FailoverManager:
             return _failed("carrier firewall manifest could not be updated for cutover")
         if not dry_run:
             _, o_nat, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True)
-            inner_peer = protocols.carrier_inner_pair(current_protocol, pair_id, "prod")[1]
+            inner_peer = protocols.carrier_inner_pair(current_protocol, pair_id, "prod", protocols.pair_base(pair))[1]
             if f"--to-destination {inner_peer}:{frontend}" in o_nat:
                 for add in _carrier_dnat_cmds(carrier_plan.get("iran_cmds", [])):
                     check = add.replace("-A PREROUTING", "-C PREROUTING", 1)
