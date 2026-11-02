@@ -85,6 +85,37 @@ def qualified_from_rows(rows: list) -> dict:
     return out
 
 
+def apply_quick_profile() -> None:
+    """Shorten the bench for a quick test: a 10 s stability window
+    instead of 30 s, and no iperf3 legs (the bulk ladder stands in for
+    throughput, exactly as it does when iperf3 is missing). The DPI
+    gates — deploy, base RTT, latency/jitter/loss probes, bulk ladder —
+    all stay, so a quick score is comparable among quick scores, just
+    not with a full sweep's. Quick results are stored separately and
+    never merged into candidate_scores."""
+    import probe
+    probe.STABILITY_SAMPLES = 10
+    probe.STABILITY_WINDOW = 10.0
+    import engine
+    engine.measure_iperf3_throughput = (
+        lambda *a, **k: {"available": False,
+                         "reason": "quick test skips iperf3"})
+
+
+def read_quick_rows(healer_db: str, run_id: str) -> list:
+    """All rows of a quick run, with the fields the dashboard shows."""
+    conn = sqlite3.connect(healer_db, timeout=15.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(
+            "SELECT protocol, score, disqualified, latency_ms, jitter_ms,"
+            " loss_pct FROM benchmarks WHERE run_id = ? ORDER BY id",
+            (run_id,))
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def read_new_rows(healer_db: str, run_id: str, after_id: int):
     """Rows for this run with id > after_id, in order. Returns
     (rows, max_id) where rows are plain dicts."""
@@ -229,9 +260,13 @@ def select_dial_hosts(hub_pair, healer_row, wizard_row):
     return hub_pair.get("inner_iran"), hub_pair.get("inner_foreign"), "hub"
 
 
-def run_sweep(pair_id: int, hub_db: str, log) -> dict:
+def run_sweep(pair_id: int, hub_db: str, log, quick: bool = False) -> dict:
     """Run the ladder in a thread, apply scores progressively, then
-    finalize. Returns a summary dict."""
+    finalize. Returns a summary dict.
+
+    quick=True runs the same gates with the quick profile and stores
+    the ranking as a quick test instead of touching candidate_scores,
+    the healer config, or the live tunnel."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if repo_root not in sys.path:
@@ -248,7 +283,8 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
     if iran is None or foreign is None:
         raise ValueError("pair %d has no servers" % pair_id)
     healer_db = healer_paths.db_path(pair_id)
-    run_id = "sweep-%d-%d" % (pair_id, int(time.time()))
+    run_id = "%s-%d-%d" % ("quick" if quick else "sweep", pair_id,
+                           int(time.time()))
 
     def spec(server, dial_host):
         return {"host": server["host"], "port": int(server.get("port") or 22),
@@ -284,6 +320,8 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
     # be set before the import — exactly like a hand-run sweep script.
     os.environ["BEST_TUNNEL_DB_PATH"] = healer_db
     import engine
+    if quick:
+        apply_quick_profile()
 
     # Dial hosts must be the LIVE carrier's addresses, not the hub row's
     # creation-time inners (bug 12, 2026-11-01: pair 3's hub inners were
@@ -333,10 +371,14 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
             continue
         if rows:
             total_rows += len(rows)
-            merged = apply_rows_to_hub(store, pair_id, rows)
-            for row in rows:
-                log("applied %s score=%s (dashboard now: %d protocols)"
-                    % (row["protocol"], row["score"], len(merged)))
+            if quick:
+                for row in rows:
+                    log("quick %s score=%s" % (row["protocol"], row["score"]))
+            else:
+                merged = apply_rows_to_hub(store, pair_id, rows)
+                for row in rows:
+                    log("applied %s score=%s (dashboard now: %d protocols)"
+                        % (row["protocol"], row["score"], len(merged)))
     thread.join()
     try:
         rows, seen_id = read_new_rows(healer_db, run_id, seen_id)
@@ -345,7 +387,30 @@ def run_sweep(pair_id: int, hub_db: str, log) -> dict:
         rows = []
     if rows:
         total_rows += len(rows)
-        apply_rows_to_hub(store, pair_id, rows)
+        if not quick:
+            apply_rows_to_hub(store, pair_id, rows)
+    if quick:
+        qrows = read_quick_rows(healer_db, run_id)
+        qualified_rows = [r for r in qrows
+                          if not r.get("disqualified") and (r.get("score") or 0) > 0]
+        winner = (sorted(qualified_rows, key=lambda r: (-r["score"], r["protocol"]))[0]["protocol"]
+                  if qualified_rows else None)
+        store.save_quick_test(pair_id, winner, qrows)
+        if errors:
+            log("engine thread failed:\n%s" % errors[0])
+        log("quick test done: winner=%s (%d protocols)" % (winner, len(qrows)))
+        cleanup_bench(iran["host"], foreign["host"], log)
+        summary = {
+            "run_id": run_id, "rows": total_rows,
+            "qualified": {r["protocol"]: r["score"] for r in qualified_rows},
+            "winner": winner,
+            "engine_error": bool(errors),
+        }
+        store.log_event("quick_test",
+                        "Quick test for pair %s done: winner %s"
+                        % (pair.get("name") or pair_id, winner),
+                        pair_id=pair_id, data=summary)
+        return summary
     final_pair = store.get_pair(pair_id) or {}
     qualified = dict(final_pair.get("candidate_scores") or {})
 
@@ -375,13 +440,21 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pair-id", type=int, required=True)
     parser.add_argument("--hub-db", required=True)
+    parser.add_argument("--quick", action="store_true",
+                        help="quick test: shorter stability window, no iperf3,"
+                             " results stored separately from sweep scores")
     args = parser.parse_args(argv)
     pair_id = args.pair_id
 
     def log(msg):
         print(msg, flush=True)
 
-    pidfile = pidfile_path(pair_id)
+    # The pidfile matches the scope the job handler spawned: a quick
+    # run must not leave a sweep pidfile behind (or a later sweep
+    # would refuse as already-running while nothing runs).
+    pidfile = os.path.join(pidfile_dir(),
+                            ("quicktest-p%d.pid" if args.quick
+                             else "sweep-p%d.pid") % pair_id)
     try:
         os.makedirs(os.path.dirname(pidfile), exist_ok=True)
         with open(pidfile, "w") as f:
@@ -389,13 +462,13 @@ def main(argv=None) -> int:
     except OSError as exc:
         log("pidfile write failed (continuing): %s" % exc)
     try:
-        summary = run_sweep(pair_id, args.hub_db, log)
+        summary = run_sweep(pair_id, args.hub_db, log, quick=args.quick)
         log("qualified: %s" % json.dumps(summary["qualified"], sort_keys=True))
-        log("SWEEP_DONE")
+        log("QUICK_DONE" if args.quick else "SWEEP_DONE")
         return 0 if summary["rows"] > 0 else 1
     except Exception:
         traceback.print_exc()
-        log("SWEEP_FAILED")
+        log("QUICK_FAILED" if args.quick else "SWEEP_FAILED")
         return 1
     finally:
         try:

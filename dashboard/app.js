@@ -6,6 +6,15 @@ let state = { servers: [], pairs: [], events: [], filter: "all", section: "overv
 
 let serverMetrics = {};
 let pairMetrics = {};
+let pairTraffic = {};
+let pairQuick = {};
+function fmtBytes(n) {
+  if (n == null) return "—";
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GiB";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MiB";
+  if (n >= 1024) return (n / 1024).toFixed(0) + " KiB";
+  return n + " B";
+}
 let pairBenchmarks = {};
 
 async function api(method, path, body) {
@@ -72,6 +81,22 @@ function bar(pct, cls) {
 }
 
 
+function qtBlock(p) {
+  const q = pairQuick[p.id];
+  if (!q) return "";
+  if (q.running) return `<span class="muted small">تست سریع در حال اجراست… نتیجه‌اش با تازه‌سازی می‌آید.</span>`;
+  const r = q.result;
+  if (!r) return "";
+  const rows = (r.results || []).map(x =>
+    `<span class="ltr">${x.protocol}</span>: ${x.disqualified ? "رد شده" : (x.score ?? 0)}`).join(" · ");
+  const winner = r.winner;
+  const deploy = (winner && winner !== p.current_protocol)
+    ? `<button class="act-btn green" data-act="deploy-best">استقرار بهترین (${winner})</button>`
+    : (winner ? `<span class="muted small">هم‌اکنون روی بهترین پروتکل هستی (${winner}).</span>`
+              : `<span class="muted small">تست سریع هیچ پروتکلی را قبول نکرد.</span>`);
+  return `<div class="muted small">نتیجه تست سریع${winner ? ` — برنده: <span class="ltr">${winner}</span>` : ""}</div><div class="muted small">${rows}</div>${deploy}`;
+}
+
 function renderPairs() {
   const rank = { down: 0, stale: 1, healthy: 2 };
   const list = state.pairs.filter(p => state.filter === "all" || pairState(p) === state.filter)
@@ -83,6 +108,8 @@ function renderPairs() {
     const thr = pm.filter(x => x.rx_kbps != null).map(x => x.rx_kbps + x.tx_kbps);
     const lastLat = lat.length ? lat[lat.length - 1].toFixed(1) + " ms" : "—";
     const lastThr = thr.length ? thr[thr.length - 1].toFixed(1) + " kbps" : "—";
+    const tot = pairTraffic[p.id];
+    const totStr = tot ? fmtBytes(tot.rx_total + tot.tx_total) : "—";
     // Every qualified protocol (score > 0) gets a card: dot + link emoji +
     // name on top, star score below, and a switch key under it. The emoji
     // sits left of the name (RTL flow: dot, name, emoji). The active card
@@ -142,6 +169,7 @@ function renderPairs() {
         <div class="tunnel-kpis">
           <div class="kpi"><span>تأخیر زنده</span><b class="ltr">${lastLat}</b></div>
           <div class="kpi"><span>توان زنده</span><b class="ltr">${lastThr}</b></div>
+          <div class="kpi"><span>مجموع ترافیک</span><b class="ltr">${totStr}</b></div>
         </div>
       </div>
       <p class="meta">مسیر داخلی: <span class="ltr">${p.inner_iran || "—"} ⇄ ${p.inner_foreign || "—"}</span></p>
@@ -151,7 +179,9 @@ function renderPairs() {
         <button class="act-btn green" data-act="refresh">↻ تازه‌سازی وضعیت</button>
         <button class="act-btn blue" data-act="restart">⟳ ری‌استارت نگهبان</button>
         <button class="act-btn" data-act="port">🔌 تغییر پورت تانل</button>
+        <button class="act-btn" data-act="quicktest">⚡ تست سریع</button>
       </div>
+      <div class="quicktest">${qtBlock(p)}</div>
     </article>`;
   }).join("");
   $("#pairs-empty").hidden = state.pairs.length > 0;
@@ -206,6 +236,20 @@ function renderPairs() {
         openSwitchDialog(+id, pair ? pair.current_protocol : "", btn.dataset.proto);
       };
     });
+    const qtBtn = card.querySelector('[data-act="quicktest"]');
+    if (qtBtn) qtBtn.onclick = async () => {
+      await api("POST", `/api/pairs/${id}/quick_test`);
+      showBanner("تست سریع ساخته شد؛ نتیجه‌اش با تازه‌سازی می‌آید.");
+      setTimeout(loadAll, 3000);
+    };
+    const deployBtn = card.querySelector('[data-act="deploy-best"]');
+    if (deployBtn) deployBtn.onclick = async () => {
+      try {
+        const d = await api("POST", `/api/pairs/${id}/deploy_best`);
+        showBanner(d.deployed ? "جاب استقرار بهترین ساخته شد." : ("استقرار انجام نشد: " + (d.reason || "")));
+        setTimeout(loadAll, 3000);
+      } catch (e) { showBanner("استقرار بهترین انجام نشد: " + (e.message || "خطای شبکه"), true, 15000); }
+    };
     card.querySelectorAll("button.reprobe-btn").forEach(btn => {
       btn.onclick = async () => {
         await api("POST", "/api/jobs", { type: "spoof_probe", pair_id: +id });
@@ -316,12 +360,16 @@ async function loadAll() {
         catch { serverMetrics[sv.id] = []; }
       }),
       ...state.pairs.map(async pr => {
-        try { const d = await api("GET", `/api/pairs/${pr.id}/metrics`); pairMetrics[pr.id] = d.metrics; }
-        catch { pairMetrics[pr.id] = []; }
+        try { const d = await api("GET", `/api/pairs/${pr.id}/metrics`); pairMetrics[pr.id] = d.metrics; pairTraffic[pr.id] = d.traffic_total || null; }
+        catch { pairMetrics[pr.id] = []; pairTraffic[pr.id] = null; }
       }),
       ...state.pairs.map(async pr => {
         try { const d = await api("GET", `/api/pairs/${pr.id}/benchmarks`); pairBenchmarks[pr.id] = d.benchmarks || []; }
         catch { pairBenchmarks[pr.id] = []; }
+      }),
+      ...state.pairs.map(async pr => {
+        try { pairQuick[pr.id] = await api("GET", `/api/pairs/${pr.id}/quick_test`); }
+        catch { pairQuick[pr.id] = null; }
       }),
     ]);
     renderCounters(); renderServerStrip(); renderPairs(); renderTables();
@@ -428,6 +476,36 @@ $("#login-form").onsubmit = async e => {
   catch (err) { authError(err.message); }
 };
 $("#logout-btn").onclick = async () => { await api("POST", "/api/logout").catch(() => {}); location.reload(); };
+$("#backup-btn").onclick = async () => {
+  try {
+    const d = await api("GET", "/api/backup");
+    const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "rahyaab-backup.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { showBanner("بکاپ انجام نشد: " + (e.message || "خطای شبکه"), true, 15000); }
+};
+$("#restore-btn").onclick = () => $("#restore-file").click();
+$("#restore-file").onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const body = JSON.parse(await file.text());
+    const d = await api("POST", "/api/backup", body);
+    showBanner(`بازیابی انجام شد: ${d.added_servers} سرور و ${d.added_pairs} جفت اضافه شد. جفت‌های بازیابی‌شده فقط رکوردند؛ تانلشان با روند عادی بالا می‌آید.`);
+    loadAll();
+  } catch (err) { showBanner("بازیابی انجام نشد: " + (err.message || "فایل نامعتبر است"), true, 15000); }
+};
+$("#panel-path-btn").onclick = async () => {
+  if (!confirm("مسیر پنل عوض می‌شود و صفحه به مسیر تازه می‌رود. ادامه می‌دهی؟")) return;
+  try {
+    const d = await api("POST", "/api/panel_path", { action: "rotate" });
+    location.href = "/" + d.panel_path + "/";
+  } catch { alert("چرخش مسیر انجام نشد."); }
+};
 $("#refresh-btn").onclick = loadAll;
 $("#theme-btn").onclick = () => {
   const root = document.documentElement;

@@ -155,6 +155,16 @@ def audit_shell_scripts() -> list[str]:
         checked += 1
         found = set(SHA256_RE.findall(text))
         if not found:
+            # Second accepted verification form: the --release flow
+            # verifies the tarball against the release's own SHA256SUMS
+            # file (verify_sha256_file, sha256sum -c). A future
+            # release's hash cannot be a literal in today's installer,
+            # so a pinned literal is impossible here; GitHub-first
+            # ordering means a tampered mirror only matters when
+            # GitHub itself is unreachable. A download with neither a
+            # literal nor a checksum-file check still fails below.
+            if "SHA256SUMS" in text and "sha256sum -c" in text:
+                continue
             _fail(problems, f"{name}: downloads a release binary but pins no SHA-256")
             continue
         if "sha256sum" not in text:

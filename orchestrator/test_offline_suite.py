@@ -1189,11 +1189,13 @@ class TestSupervisoryCompliance(unittest.TestCase):
         os.environ.pop("BEST_TUNNEL_ENABLE_SINGBOX", None)
         os.environ.pop("BEST_TUNNEL_DISABLE_SINGBOX", None)
         active_protos = protocols.get_supported_protocols()
-        # 11 base since hysteria2 graduated (a real overlay this product
+        # 16 base since hysteria2 graduated (a real overlay this product
         # builds and benchmarks, not a flag-gated experiment) and
-        # spoof-wireguard joined gated, plus the 2 graduated sing-box
-        # protocols.
-        self.assertEqual(len(active_protos), 13)
+        # spoof-wireguard joined gated, plus fou-gre/ipip/wireguard from
+        # C-Tunnel's kernel list, wireguard-fec for lossy paths and
+        # tcp-lanes from C-Tunnel's revcarrier, plus the 2 graduated
+        # sing-box protocols.
+        self.assertEqual(len(active_protos), 18)
         self.assertIn("ESP", active_protos)
         self.assertIn("GRE", active_protos)
         self.assertIn("hysteria2", active_protos)
@@ -1204,18 +1206,18 @@ class TestSupervisoryCompliance(unittest.TestCase):
         # The engine must resolve the set live, not from an import-time snapshot
         self.assertEqual(engine.get_supported_protocols(), active_protos)
 
-        # 2. Kill switch: re-quarantined back to the base 11.
+        # 2. Kill switch: re-quarantined back to the base 15.
         os.environ["BEST_TUNNEL_DISABLE_SINGBOX"] = "1"
         try:
             reduced = protocols.get_supported_protocols()
-            self.assertEqual(len(reduced), 11)
+            self.assertEqual(len(reduced), 16)
             self.assertEqual(reduced, protocols.BASE_PROTOCOLS)
             self.assertIn("hysteria2", reduced)
             self.assertNotIn("singbox-vless-reality", reduced)
             self.assertEqual(engine.get_supported_protocols(), reduced)
         finally:
             os.environ.pop("BEST_TUNNEL_DISABLE_SINGBOX", None)
-        self.assertEqual(len(engine.get_supported_protocols()), 13)
+        self.assertEqual(len(engine.get_supported_protocols()), 18)
 
     def test_134_singbox_graduation_is_real_for_the_selector(self):
         """Graduation is not a label: once sing-box is first-class, benchmark
@@ -3088,7 +3090,9 @@ class TestSupervisoryCompliance(unittest.TestCase):
             if b"/releases/download/" in raw:
                 downloaders.append(name)
                 self.assertIn(canonical.encode(), raw, f"{name}: mirror fallback drifted from binary_manager")
-        self.assertEqual(len(downloaders), 10, "Expected 10 downloading installers")
+        # 11 since 2026-11-02: install.sh itself downloads release
+        # tarballs (fetch_release_code, verified against SHA256SUMS).
+        self.assertEqual(len(downloaders), 11, "Expected 11 downloading installers")
 
         # 4. The hygiene audit passes against the real repository.
         self.assertEqual(verify_checksums.audit_installer_hygiene(), [])
@@ -4600,6 +4604,10 @@ class TestSupervisoryCompliance(unittest.TestCase):
                                 f"{proto} requires unpinned binary {binary}")
         self.assertEqual(binary_manager.required_binaries("GRE"), [])
         self.assertEqual(binary_manager.required_binaries("ESP"), [])
+        self.assertEqual(binary_manager.required_binaries("fou-gre"), [])
+        self.assertEqual(binary_manager.required_binaries("ipip"), [])
+        self.assertEqual(binary_manager.required_binaries("wireguard"), ["wireguard-tools"])
+        self.assertEqual(binary_manager.required_binaries("wireguard-fec"), ["wireguard-tools"])
 
         pid = storage.add_pair(name=f"f3_{int(time.time() * 1000)}",
                                iran_host="198.51.100.10", foreign_host="203.0.113.20",

@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from . import auth, healerctl, join, metrics
-from .jobs import HANDLERS, Worker
+from .jobs import HANDLERS, Worker, _quicktest_running
 from .ssh import executor_for_server
 from .store import Store
 
@@ -371,6 +371,159 @@ class Hub:
         return self.store.create_job("spoof_probe", pair_id,
                                      {"spoof_ips": spoof_ips})
 
+    def export_backup(self) -> dict:
+        """One JSON document: all servers and pairs, no secrets.
+
+        Servers carry key *paths*, never key material; users, sessions
+        and hub settings stay local and are never exported. Pairs
+        reference their servers by name+host so a restore works on a
+        different hub, not just this one's row ids.
+        """
+        servers = self.store.list_servers()
+        by_id = {s["id"]: s for s in servers}
+        pairs = []
+        for p in self.store.list_pairs():
+            iran = by_id.get(p["iran_server_id"]) or {}
+            foreign = by_id.get(p["foreign_server_id"]) or {}
+            pairs.append({
+                "name": p["name"],
+                "iran_server": {"name": iran.get("name"), "host": iran.get("host")},
+                "foreign_server": {"name": foreign.get("name"), "host": foreign.get("host")},
+                "frontend_port": p.get("frontend_port"),
+                "current_protocol": p.get("current_protocol"),
+                "candidate_scores": p.get("candidate_scores") or {},
+                "spoof_status": p.get("spoof_status"),
+            })
+        return {
+            "version": 1,
+            "exported_at": time.time(),
+            "servers": [{
+                "name": s["name"], "host": s["host"], "port": s.get("port"),
+                "username": s.get("username"), "key_path": s.get("key_path"),
+                "notes": s.get("notes"),
+            } for s in servers],
+            "pairs": pairs,
+        }
+
+    def import_backup(self, body: dict) -> dict:
+        """Restore a backup, adding only what is missing (C-Tunnel's
+        rule). Existing servers (same name+host+port) and existing
+        pairs (same name+servers) are never overwritten: a restore
+        must not change a live pair's port or protocol. Restored pairs
+        are records only — their tunnels are brought up through the
+        normal setup/switch flow, never claimed live by the restore.
+        Users, sessions and settings are never imported."""
+        if not isinstance(body, dict) or body.get("version") != 1:
+            raise ApiError(400, "backup version must be 1")
+        servers = body.get("servers")
+        pairs = body.get("pairs")
+        if not isinstance(servers, list) or not isinstance(pairs, list):
+            raise ApiError(400, "backup must carry servers and pairs lists")
+        server_ids = {}
+        added_servers = 0
+        for s in servers:
+            if not isinstance(s, dict) or not s.get("name") or not s.get("host"):
+                raise ApiError(400, "each server needs a name and host")
+            existing = None
+            for cur in self.store.list_servers():
+                if (cur["name"], cur["host"], cur.get("port")) == (
+                        s["name"], s["host"], s.get("port")):
+                    existing = cur
+                    break
+            if existing is not None:
+                server_ids[(s["name"], s["host"])] = existing["id"]
+            else:
+                row = self.store.create_server({
+                    "name": s["name"], "host": s["host"],
+                    "port": s.get("port") or 22,
+                    "username": s.get("username") or "root",
+                    "key_path": s.get("key_path"),
+                    "notes": s.get("notes") or ""})
+                server_ids[(s["name"], s["host"])] = row["id"]
+                added_servers += 1
+        added_pairs = 0
+        for p in pairs:
+            if not isinstance(p, dict) or not p.get("name"):
+                raise ApiError(400, "each pair needs a name")
+            iran_ref = p.get("iran_server") or {}
+            foreign_ref = p.get("foreign_server") or {}
+            iran_id = server_ids.get((iran_ref.get("name"), iran_ref.get("host")))
+            foreign_id = server_ids.get((foreign_ref.get("name"),
+                                         foreign_ref.get("host")))
+            if iran_id is None or foreign_id is None:
+                raise ApiError(400, "pair %s references an unknown server"
+                               % p.get("name"))
+            duplicate = any(
+                cur["name"] == p["name"]
+                and cur["iran_server_id"] == iran_id
+                and cur["foreign_server_id"] == foreign_id
+                for cur in self.store.list_pairs())
+            if duplicate:
+                continue
+            self.store.create_pair({
+                "name": p["name"], "iran_server_id": iran_id,
+                "foreign_server_id": foreign_id,
+                "frontend_port": p.get("frontend_port") or 443,
+                "current_protocol": p.get("current_protocol"),
+                "candidate_scores": p.get("candidate_scores") or {}})
+            added_pairs += 1
+        self.store.log_event("backup_restore",
+                             "Backup restored: %d servers, %d pairs added"
+                             % (added_servers, added_pairs))
+        return {"added_servers": added_servers, "added_pairs": added_pairs}
+
+    def quick_test_pair(self, pair_id: int) -> dict:
+        """Queue a quick test; the scope runner writes its row."""
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        return self.store.create_job("quick_test", pair_id, {})
+
+    def quick_test_status(self, pair_id: int) -> dict:
+        """Running flag plus the latest finished quick test, if any."""
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        return {"running": _quicktest_running(pair_id),
+                "result": self.store.latest_quick_test(pair_id)}
+
+    def deploy_best_pair(self, pair_id: int) -> dict:
+        """Deploy the quick test's winner with one click: a plain
+        switch job to the winning protocol. Refuses without a finished
+        test, without a qualified winner, or when already on it."""
+        pair = self.store.get_pair(pair_id)
+        if pair is None:
+            raise ApiError(404, "pair not found")
+        result = self.store.latest_quick_test(pair_id)
+        if result is None:
+            raise ApiError(400, "no finished quick test for this pair")
+        winner = result.get("winner")
+        if not winner:
+            raise ApiError(400, "quick test qualified no protocol")
+        if winner == pair.get("current_protocol"):
+            return {"deployed": False, "protocol": winner,
+                    "reason": "already on the winner"}
+        return {"deployed": True,
+                "job": self.store.create_job("switch", pair_id,
+                                             {"protocol": winner})}
+
+    def rotate_panel_path(self, body: dict) -> dict:
+        """Rotate (or clear) the dashboard's private base path.
+
+        Rotation logs nobody out: sessions live under /api, which never
+        moves. The caller must navigate to the new path itself, since
+        the old one stops serving pages immediately.
+        """
+        import secrets
+        action = body.get("action") or "rotate"
+        if action == "clear":
+            self.store.set_panel_path("")
+        elif action == "rotate":
+            self.store.set_panel_path("panel-" + secrets.token_hex(8))
+        else:
+            raise ApiError(400, "action must be rotate or clear")
+        return {"panel_path": self.store.get_panel_path()}
+
 
 _STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
@@ -384,10 +537,31 @@ def make_handler(hub: Hub, static_dir=None):
             pass
 
         def _send_static(self, path: str) -> bool:
-            """Serve the Phase 3 dashboard. Returns False when not a static path."""
+            """Serve the Phase 3 dashboard. Returns False when not a static path.
+
+            When the hub has a private panel path, the pages live only
+            under it (/panel-xxx/ and /panel-xxx/static/*); the root
+            paths then fall through to a 404 instead of revealing the
+            dashboard's location.
+            """
             if static_dir is None:
                 return False
-            if path == "/":
+            panel_path = hub.store.get_panel_path()
+            if panel_path:
+                prefix = "/" + panel_path
+                if path == prefix + "/":
+                    rel = "index.html"
+                elif path.startswith(prefix + "/static/"):
+                    rel = path[len(prefix + "/static/"):]
+                elif path == "/" or path.startswith("/static/"):
+                    # The dashboard's old root paths must not fall
+                    # through to the API router (which would answer
+                    # 401 and confirm something lives here): 404.
+                    self._send(404, {"error": "not found"})
+                    return True
+                else:
+                    return False
+            elif path == "/":
                 rel = "index.html"
             elif path.startswith("/static/"):
                 rel = path[len("/static/"):]
@@ -514,6 +688,20 @@ def make_handler(hub: Hub, static_dir=None):
             m = re.fullmatch(r"/api/pairs/(\d+)/spoof_probe", path)
             if m and method == "POST":
                 return 201, hub.spoof_probe_pair(int(m.group(1)), body), None, False
+            if path == "/api/panel_path" and method == "POST":
+                return 200, hub.rotate_panel_path(body), None, False
+            if path == "/api/backup" and method == "GET":
+                return 200, hub.export_backup(), None, False
+            if path == "/api/backup" and method == "POST":
+                return 201, hub.import_backup(body), None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/quick_test", path)
+            if m and method == "POST":
+                return 201, hub.quick_test_pair(int(m.group(1))), None, False
+            if m and method == "GET":
+                return 200, hub.quick_test_status(int(m.group(1))), None, False
+            m = re.fullmatch(r"/api/pairs/(\d+)/deploy_best", path)
+            if m and method == "POST":
+                return 201, hub.deploy_best_pair(int(m.group(1))), None, False
             m = re.fullmatch(r"/api/pairs/(\d+)/history", path)
             if m and method == "GET":
                 pair = hub.store.get_pair(int(m.group(1)))
@@ -532,7 +720,9 @@ def make_handler(hub: Hub, static_dir=None):
                 if hub.store.get_pair(int(m.group(1))) is None:
                     raise ApiError(404, "pair not found")
                 return 200, {"metrics": hub.store.list_pair_metrics(
-                    int(m.group(1)))}, None, False
+                    int(m.group(1))),
+                    "traffic_total": hub.store.get_pair_traffic_total(
+                        int(m.group(1)))}, None, False
             m = re.fullmatch(r"/api/pairs/(\d+)/benchmarks", path)
             if m and method == "GET":
                 return 200, {"benchmarks": hub.pair_benchmarks(

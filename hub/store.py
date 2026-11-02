@@ -103,6 +103,30 @@ CREATE TABLE IF NOT EXISTS pair_metrics (
     rx_kbps REAL,
     tx_kbps REAL
 );
+-- Quick-test results: one row per finished quick test. Quick scores
+-- live here, never in candidate_scores: a quick test measures with a
+-- shorter stability window and no iperf3 legs, so its numbers are
+-- comparable among themselves but not with a full sweep's.
+CREATE TABLE IF NOT EXISTS quick_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_id INTEGER NOT NULL REFERENCES pairs(id),
+    created_at REAL NOT NULL,
+    winner TEXT,
+    results TEXT NOT NULL
+);
+-- Cumulative traffic per pair. Interface counters restart at zero
+-- whenever the carrier interface is recreated, so the collector folds
+-- each sample's delta into these totals instead of trusting the raw
+-- counter: a reset adds the new counter's bytes on top of the total
+-- folded so far, and the total never goes backwards or resets.
+CREATE TABLE IF NOT EXISTS pair_traffic_totals (
+    pair_id INTEGER PRIMARY KEY REFERENCES pairs(id),
+    rx_total INTEGER NOT NULL DEFAULT 0,
+    tx_total INTEGER NOT NULL DEFAULT 0,
+    last_rx INTEGER,
+    last_tx INTEGER,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -143,6 +167,22 @@ class Store:
         with self._connect() as conn:
             conn.execute("INSERT OR REPLACE INTO settings (key, value) "
                          "VALUES (?, ?)", (key, value))
+
+    def get_panel_path(self) -> str:
+        """The dashboard's private base path, or "" for the root.
+
+        A fresh hub gets a random path (panel-<hex>) seeded by the
+        installer; an older hub keeps the root until its operator
+        rotates it. The API always stays at /api, only the served
+        pages move under the path, so probing / finds nothing.
+        """
+        return self.get_setting("panel_path", "") or ""
+
+    def set_panel_path(self, value: str) -> None:
+        import re
+        if value != "" and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value):
+            raise ValueError("panel path must be empty or a plain path segment")
+        self.set_setting("panel_path", value)
 
     def get_hub_identity(self) -> dict:
         """This hub's multi-master identity, seeded by the installer.
@@ -560,6 +600,64 @@ class Store:
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (pair_id, now, data.get("latency_ms"), data.get("rx_bytes"),
                  data.get("tx_bytes"), rx_kbps, tx_kbps))
+            # Fold this sample into the cumulative total. A counter that
+            # moved forward adds its delta; a counter that went backwards
+            # was recreated, so its new value counts on top of the total
+            # folded so far instead of wiping it. The first sample only
+            # anchors the counters: bytes counted before we started
+            # watching are not ours to claim.
+            rx, tx = data.get("rx_bytes"), data.get("tx_bytes")
+            if rx is not None and tx is not None:
+                row = conn.execute(
+                    "SELECT rx_total, tx_total, last_rx, last_tx"
+                    " FROM pair_traffic_totals WHERE pair_id = ?",
+                    (pair_id,)).fetchone()
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO pair_traffic_totals"
+                        " (pair_id, rx_total, tx_total, last_rx, last_tx, updated_at)"
+                        " VALUES (?, 0, 0, ?, ?, ?)", (pair_id, rx, tx, now))
+                else:
+                    rx_add = rx - row["last_rx"] if rx >= row["last_rx"] else rx
+                    tx_add = tx - row["last_tx"] if tx >= row["last_tx"] else tx
+                    conn.execute(
+                        "UPDATE pair_traffic_totals SET rx_total = rx_total + ?,"
+                        " tx_total = tx_total + ?, last_rx = ?, last_tx = ?,"
+                        " updated_at = ? WHERE pair_id = ?",
+                        (max(0, rx_add), max(0, tx_add), rx, tx, now, pair_id))
+
+    def save_quick_test(self, pair_id: int, winner: str | None,
+                        results: list, created_at: float | None = None) -> dict:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO quick_tests (pair_id, created_at, winner, results)"
+                " VALUES (?, ?, ?, ?)",
+                (pair_id, created_at or time.time(), winner,
+                 json.dumps(results)))
+            row_id = cur.lastrowid
+        return {"id": row_id, "pair_id": pair_id, "winner": winner,
+                "results": results}
+
+    def latest_quick_test(self, pair_id: int) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, pair_id, created_at, winner, results FROM quick_tests"
+                " WHERE pair_id = ? ORDER BY id DESC LIMIT 1",
+                (pair_id,)).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["results"] = json.loads(out["results"])
+        return out
+
+    def get_pair_traffic_total(self, pair_id: int) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT rx_total, tx_total FROM pair_traffic_totals"
+                " WHERE pair_id = ?", (pair_id,)).fetchone()
+        if row is None:
+            return {"rx_total": 0, "tx_total": 0}
+        return {"rx_total": row["rx_total"], "tx_total": row["tx_total"]}
 
     def list_pair_metrics(self, pair_id: int, limit: int = 180) -> list[dict]:
         with self._connect() as conn:

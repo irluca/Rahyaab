@@ -424,6 +424,11 @@ fi
 PROTOCOL_BINARIES = {
     "GRE": (),
     "ESP": (),
+    "fou-gre": (),
+    "ipip": (),
+    "wireguard": ("wireguard-tools",),
+    "wireguard-fec": ("wireguard-tools",),
+    "tcp-lanes": (),
     "backhaul-wss": ("backhaul",),
     "rathole-noise": ("rathole",),
     "chisel-wss": ("chisel",),

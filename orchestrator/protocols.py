@@ -123,7 +123,7 @@ def dials_gre_underlay(pair: dict) -> bool:
 # generator that configures the /30 and another in the engine that pings it - a probe aimed at a stale
 # address reads as 100% loss on a healthy carrier, which is the failure shape this project has already
 # been told to treat as a verdict on the transport.
-INNER_PROBED = ("GRE", "ESP")
+INNER_PROBED = ("GRE", "ESP", "fou-gre", "ipip", "wireguard", "wireguard-fec")
 
 
 def pair_token(pair_id: int, tag: str = "") -> str:
@@ -151,14 +151,28 @@ def pair_base(pair) -> int:
         return 10
 
 
+_CARRIER_IFACE_PREFIX = {
+    "GRE": "grep",
+    "ESP": "espp",
+    "fou-gre": "foug",
+    "ipip": "ipip",
+    "wireguard": "wg",
+    "wireguard-fec": "wgf",
+}
+
+
 def carrier_iface(protocol: str, pair_id: int, namespace: str = "prod", tag: str = "") -> str:
     """The interface name a carrier owns: grep/espp plus pair id, plus 'b' for a benchmark carrier.
 
     The hub tag, when present, sits between the pair id and the bench
     suffix (grep1a1b2, espp1a1b2b): two masters' pair 1 then own different
     interfaces on a shared node instead of fighting over grep1/espp1.
+    Kernel carriers added from C-Tunnel's list (fou-gre, ipip,
+    wireguard) follow the same shape with their own prefix.
     """
-    base = "grep" if protocol == "GRE" else "espp"
+    base = _CARRIER_IFACE_PREFIX.get(protocol)
+    if base is None:
+        raise ValueError(f"no carrier interface for protocol: {protocol}")
     return f"{base}{pair_id}{tag}{'b' if namespace == 'bench' else ''}"
 
 
@@ -176,10 +190,19 @@ def carrier_inner_pair(protocol: str, pair_id: int, namespace: str = "prod", bas
     would make the routing decision, and therefore the measurement, depend on which unit started first.
     The same holds across hubs, which is why the base exists at all.
     """
-    if protocol == "GRE":
-        octet = f"10.{base}" if namespace != "bench" else f"10.{base + 1}"
-    else:
-        octet = f"10.{base + 2}" if namespace != "bench" else f"10.{base + 3}"
+    # Octet map per carrier, prod then bench, each one higher than the
+    # last so no two carriers on one host ever share an address: GRE
+    # base/base+1, ESP base+2/base+3, spoof base+4/base+5 (in its own
+    # generator), then the C-Tunnel kernel carriers: fou-gre base+6/7,
+    # ipip base+8/9, wireguard base+12/13, wireguard-fec base+14/15.
+    _octets = {
+        "GRE": 0, "ESP": 2, "fou-gre": 6, "ipip": 8, "wireguard": 12,
+        "wireguard-fec": 14,
+    }
+    if protocol not in _octets:
+        raise ValueError(f"no carrier inners for protocol: {protocol}")
+    off = _octets[protocol] + (1 if namespace == "bench" else 0)
+    octet = f"10.{base + off}"
     idx = (pair_id % 200) + 10
     if namespace == "bench":
         idx = ((pair_id + 50) % 200) + 10
@@ -856,6 +879,1025 @@ TEARDOWN_TIMEOUT_SEC = CARRIER_STOP_BUDGET_SEC + 30
 # `Error: argument "ALGO-ICV-LEN" is required` - a batch file that installs nothing while the unit
 # reports the batch's exit status. 96 bits also installed; 128 is the full GCM tag and what RFC 4106
 # profiles by default, so the shorter tag that some VPNs negotiate is not chosen here.
+
+
+def _carrier_nat_rules(iface, tun_ir, tun_fr, frontend, cmt):
+    """The DNAT/forward half of a kernel carrier, shared by fou-gre,
+    ipip and wireguard and shaped exactly like GRE's: Iran DNATs the
+    frontend into the tunnel (never off the carrier interface itself,
+    which is the loop-closing token GRE's comments explain at length),
+    Foreign accepts on the interface, both sides forward established
+    traffic and clamp MSS, and Iran MASQUERADEs everything but its own
+    inner source. Teardowns are derived from the installs by the same
+    rewrite, so a rule can never be installed without its delete."""
+    import re
+    ir = [
+        f"iptables -t nat -A PREROUTING -p tcp ! -i {iface} --dport {frontend} -m comment --comment \"{cmt}\" -j DNAT --to-destination {tun_fr}:{frontend}",
+        f"iptables -t nat -A PREROUTING -p udp ! -i {iface} --dport {frontend} -m comment --comment \"{cmt}\" -j DNAT --to-destination {tun_fr}:{frontend}",
+        f"iptables -I FORWARD 1 -p tcp -d {tun_fr} --dport {frontend} -m comment --comment \"{cmt}\" -j ACCEPT",
+        f"iptables -I FORWARD 1 -p udp -d {tun_fr} --dport {frontend} -m comment --comment \"{cmt}\" -j ACCEPT",
+        f"iptables -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment \"{cmt}\" -j ACCEPT",
+        f"iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment \"{cmt}\" -j TCPMSS --clamp-mss-to-pmtu",
+        f"iptables -t nat -A POSTROUTING -d {tun_fr} ! -s {tun_ir} -m comment --comment \"{cmt}\" -j MASQUERADE",
+    ]
+    fr = [
+        f"iptables -I INPUT 1 -i {iface} -p tcp --dport {frontend} -m comment --comment \"{cmt}\" -j ACCEPT || true",
+        f"iptables -I INPUT 1 -i {iface} -p udp --dport {frontend} -m comment --comment \"{cmt}\" -j ACCEPT || true",
+        f"iptables -A FORWARD -i {iface} -m comment --comment \"{cmt}\" -j ACCEPT",
+        f"iptables -A FORWARD -o {iface} -m comment --comment \"{cmt}\" -j ACCEPT",
+        f"iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment \"{cmt}\" -j ACCEPT",
+        f"iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment \"{cmt}\" -j TCPMSS --clamp-mss-to-pmtu",
+    ]
+
+    def _delete(cmd):
+        cmd = cmd.replace(" || true", "")
+        cmd = re.sub(r" -(A|I) ", " -D ", cmd, count=1)
+        # An inserted rule carries its position (-I FORWARD 1), but a
+        # delete names the rule, not the position: drop it, the way
+        # GRE's hand-written mirrors do.
+        cmd = re.sub(r"( -D \S+) \d+ ", r"\1 ", cmd, count=1)
+        return cmd + " 2>/dev/null || true"
+
+    return ir, fr, [_delete(c) for c in ir], [_delete(c) for c in fr]
+
+
+def _carrier_unit(svc_name, pair_id, namespace, iface, mtu, tun, setup_lines):
+    """A oneshot carrier unit: delete any stale interface, build it,
+    address it, bring it up, drop rp_filter (the carrier's return path
+    is asymmetric by design, like GRE's)."""
+    body = "\n".join(setup_lines)
+    return f"""[Unit]
+Description=Best Tunnel Carrier ({namespace.title()} Pair {pair_id})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+{body}
+ExecStart=/sbin/ip addr add {tun}/30 dev {iface}
+ExecStart=/sbin/ip link set {iface} up mtu {mtu}
+ExecStart=/sbin/sysctl -w net.ipv4.conf.{iface}.rp_filter=0
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def generate_fou_gre(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
+                     transport_port: int = None, mtu: int = 1348,
+                     namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
+    """GRE inside UDP (FOU): the GRE envelope for paths that filter
+    protocol 47 but pass UDP. The FOU receiver port is the bench
+    transport port for benches, else 24000 + pair id (C-Tunnel's
+    convention); the GRE key separates a bench tunnel from a live one
+    on the same host pair, exactly like GRE's bench key."""
+    ptok = pair_token(pair_id, tag)
+    iface = carrier_iface("fou-gre", pair_id, namespace, tag)
+    tun_ir, tun_fr = carrier_inner_pair("fou-gre", pair_id, namespace, base)
+    fou_port = int(transport_port) if transport_port else 24000 + (pair_id % 1000)
+    cmt = generate_firewall_comment(f"{pair_id}-{namespace}", "FOU-GRE")
+    svc_name = f"best-tunnel-{namespace}-{ptok}-fou-gre"
+    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-{ptok}.conf"
+    sysctl_body = "net.ipv4.ip_forward = 1\n"
+    bench_key = 9000 + (pair_id % 1000)
+    gre_key = f" ikey {bench_key} okey {bench_key}" if namespace == "bench" else ""
+
+    def _unit(local_ip, remote_ip, tun):
+        setup = [
+            f"ExecStart=-/sbin/ip fou del port {fou_port}",
+            f"ExecStart=/sbin/ip fou add port {fou_port} ipproto 47",
+            f"ExecStart=-/sbin/ip tunnel del {iface}",
+            f"ExecStart=/sbin/ip tunnel add {iface} mode gre remote {remote_ip} local {local_ip} ttl 255 encap fou encap-sport auto encap-dport {fou_port}{gre_key}",
+        ]
+        unit = _carrier_unit(svc_name, pair_id, namespace, iface, mtu, tun, setup)
+        # One ExecStop only: the manifest helper orders the firewall
+        # ExecStart immediately before it, and two stops would make
+        # that position ambiguous. The FOU port release is not lost:
+        # ExecStart pre-cleans it before every add, and the teardown
+        # list deletes it explicitly when the carrier is removed.
+        stop = f"ExecStop=-/sbin/ip tunnel del {iface}\n"
+        return unit.replace("\n[Install]", "\n" + stop + "\n[Install]")
+
+    def _unit_full(local_ip, remote_ip, tun):
+        return _unit(local_ip, remote_ip, tun)
+
+    ir_unit = _unit_full(ir_ip, fr_ip, tun_ir)
+    fr_unit = _unit_full(fr_ip, ir_ip, tun_fr)
+    ir_nat, fr_nat, ir_nat_td, fr_nat_td = _carrier_nat_rules(
+        iface, tun_ir, tun_fr, frontend, cmt)
+    ir_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "modprobe fou || true",
+        "modprobe ip_gre || true",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p udp --dport {fou_port} -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + ir_nat
+    fr_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "modprobe fou || true",
+        "modprobe ip_gre || true",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p udp --dport {fou_port} -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + fr_nat
+    teardown_ir = [
+        f"iptables -D INPUT -p udp --dport {fou_port} -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + ir_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf",
+        f"ip tunnel del {iface} 2>/dev/null || true",
+        f"ip fou del port {fou_port} 2>/dev/null || true",
+    ]
+    teardown_fr = [
+        f"iptables -D INPUT -p udp --dport {fou_port} -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + fr_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf",
+        f"ip tunnel del {iface} 2>/dev/null || true",
+        f"ip fou del port {fou_port} 2>/dev/null || true",
+    ]
+    fw_ir = build_firewall_manifest(svc_name, pair_id, namespace, "FOU-GRE", "iran", iface, ir_cmds, cmt)
+    fw_fr = build_firewall_manifest(svc_name, pair_id, namespace, "FOU-GRE", "foreign", iface, fr_cmds, cmt)
+    return {
+        "protocol": "fou-gre",
+        "iran_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(ir_unit, fw_ir["exec_line"]),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_ir["manifest_path"]: fw_ir["manifest"],
+        },
+        "iran_units": [svc_name],
+        "foreign_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(fr_unit, fw_fr["exec_line"]),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_fr["manifest_path"]: fw_fr["manifest"],
+        },
+        "foreign_units": [svc_name],
+        "iran_cmds": ir_cmds,
+        "foreign_cmds": fr_cmds,
+        "teardown_iran": teardown_ir,
+        "teardown_foreign": teardown_fr,
+    }
+
+
+def generate_ipip(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
+                  transport_port: int = None, mtu: int = 1400,
+                  namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
+    """Plain IPv4-in-IPv4 (protocol 4): the simplest kernel carrier
+    after GRE. Unlike GRE it has no key, so a bench tunnel cannot
+    coexist with a live one on the same host pair: the bench refuses
+    with a clear reason instead of reporting the live tunnel dead, and
+    the merge rule keeps the wizard's score (a disqualified row never
+    erases a previous score, and a scored protocol is never shown as
+    rejected)."""
+    ptok = pair_token(pair_id, tag)
+    iface = carrier_iface("ipip", pair_id, namespace, tag)
+    tun_ir, tun_fr = carrier_inner_pair("ipip", pair_id, namespace, base)
+    cmt = generate_firewall_comment(f"{pair_id}-{namespace}", "IPIP")
+    svc_name = f"best-tunnel-{namespace}-{ptok}-ipip"
+    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-{ptok}.conf"
+    sysctl_body = "net.ipv4.ip_forward = 1\n"
+
+    def _unit(local_ip, remote_ip, tun):
+        return f"""[Unit]
+Description=Best Tunnel Carrier ({namespace.title()} Pair {pair_id})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/sbin/ip tunnel del {iface}
+ExecStart=/sbin/ip tunnel add {iface} mode ipip remote {remote_ip} local {local_ip} ttl 255
+ExecStart=/sbin/ip addr add {tun}/30 dev {iface}
+ExecStart=/sbin/ip link set {iface} up mtu {mtu}
+ExecStart=/sbin/sysctl -w net.ipv4.conf.{iface}.rp_filter=0
+ExecStop=-/sbin/ip tunnel del {iface}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    ir_unit = _unit(ir_ip, fr_ip, tun_ir)
+    fr_unit = _unit(fr_ip, ir_ip, tun_fr)
+    ir_nat, fr_nat, ir_nat_td, fr_nat_td = _carrier_nat_rules(
+        iface, tun_ir, tun_fr, frontend, cmt)
+    bench_guard_ir = []
+    bench_guard_fr = []
+    if namespace == "bench":
+        # A live ipip tunnel owns its (remote, local) tuple, and ipip
+        # has no key to separate a bench tunnel from it. Refuse loudly
+        # instead of letting `ip tunnel add` fail with bare EEXIST.
+        bench_guard_ir = [
+            f"if ip tunnel show 2>/dev/null | grep -q \"ipip.*remote {fr_ip}.*local {ir_ip}\"; then echo \"BENCH_TUPLE_BUSY: a live ipip tunnel already owns this host pair; bench skipped, wizard score stands\" >&2; exit 1; fi"]
+        bench_guard_fr = [
+            f"if ip tunnel show 2>/dev/null | grep -q \"ipip.*remote {ir_ip}.*local {fr_ip}\"; then echo \"BENCH_TUPLE_BUSY: a live ipip tunnel already owns this host pair; bench skipped, wizard score stands\" >&2; exit 1; fi"]
+    ir_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "modprobe ipip || true",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p 4 -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + bench_guard_ir + ir_nat
+    fr_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "modprobe ipip || true",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p 4 -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + bench_guard_fr + fr_nat
+    teardown_ir = [
+        f"iptables -D INPUT -p 4 -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + ir_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf",
+        f"ip tunnel del {iface} 2>/dev/null || true",
+    ]
+    teardown_fr = [
+        f"iptables -D INPUT -p 4 -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + fr_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf",
+        f"ip tunnel del {iface} 2>/dev/null || true",
+    ]
+    fw_ir = build_firewall_manifest(svc_name, pair_id, namespace, "IPIP", "iran", iface, ir_cmds, cmt)
+    fw_fr = build_firewall_manifest(svc_name, pair_id, namespace, "IPIP", "foreign", iface, fr_cmds, cmt)
+    return {
+        "protocol": "ipip",
+        "iran_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(ir_unit, fw_ir["exec_line"]),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_ir["manifest_path"]: fw_ir["manifest"],
+        },
+        "iran_units": [svc_name],
+        "foreign_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(fr_unit, fw_fr["exec_line"]),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_fr["manifest_path"]: fw_fr["manifest"],
+        },
+        "foreign_units": [svc_name],
+        "iran_cmds": ir_cmds,
+        "foreign_cmds": fr_cmds,
+        "teardown_iran": teardown_ir,
+        "teardown_foreign": teardown_fr,
+    }
+
+
+def _wg_keypair():
+    """A WireGuard keypair: 32 random bytes, base64, and its X25519
+    public key. The hub runs python3-paramiko, which pulls in
+    python3-cryptography, so this is present where generators run; a
+    missing library fails loudly instead of emitting a fake key."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric import x25519
+        from cryptography.hazmat.primitives import serialization
+    except ImportError as exc:
+        raise ValueError(
+            "wireguard needs python3-cryptography (installed with "
+            "python3-paramiko on hub hosts)") from exc
+    import base64
+    priv = x25519.X25519PrivateKey.generate()
+    priv_raw = priv.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+        serialization.NoEncryption())
+    pub_raw = priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return base64.b64encode(priv_raw).decode(), base64.b64encode(pub_raw).decode()
+
+
+def generate_wireguard(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
+                       transport_port: int = None, mtu: int = 1420,
+                       namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
+    """Kernel WireGuard: the encrypted carrier. Keys are generated by
+    the hub (never on the hosts, so the peer's public key is known
+    before either side is configured); private keys travel only in
+    files the runner writes mode 0600, and units reference the file
+    path, never the key value, so no secret reaches systemd argv.
+    The listen port is the bench transport port for benches, else
+    51820 + pair id (WireGuard's conventional port)."""
+    ptok = pair_token(pair_id, tag)
+    iface = carrier_iface("wireguard", pair_id, namespace, tag)
+    tun_ir, tun_fr = carrier_inner_pair("wireguard", pair_id, namespace, base)
+    wg_port = int(transport_port) if transport_port else 51820 + (pair_id % 1000)
+    cmt = generate_firewall_comment(f"{pair_id}-{namespace}", "WIREGUARD")
+    svc_name = f"best-tunnel-{namespace}-{ptok}-wireguard"
+    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-{ptok}.conf"
+    sysctl_body = "net.ipv4.ip_forward = 1\n"
+    ir_priv, ir_pub = _wg_keypair()
+    fr_priv, fr_pub = _wg_keypair()
+    ir_keyfile = f"/etc/best-tunnel/wireguard/{namespace}-{ptok}-iran.key"
+    fr_keyfile = f"/etc/best-tunnel/wireguard/{namespace}-{ptok}-foreign.key"
+
+    def _unit(local_tun, peer_ip, peer_pub, keyfile):
+        return f"""[Unit]
+Description=Best Tunnel Carrier ({namespace.title()} Pair {pair_id})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/sbin/ip link del {iface}
+ExecStart=/sbin/ip link add {iface} type wireguard
+ExecStart=/usr/bin/wg set {iface} private-key {keyfile} listen-port {wg_port} peer {peer_pub} allowed-ips 0.0.0.0/0 endpoint {peer_ip}:{wg_port} persistent-keepalive 25
+ExecStart=/sbin/ip addr add {local_tun}/30 dev {iface}
+ExecStart=/sbin/ip link set {iface} up mtu {mtu}
+ExecStart=/sbin/sysctl -w net.ipv4.conf.{iface}.rp_filter=0
+ExecStop=-/sbin/ip link del {iface}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    ir_unit = _unit(tun_ir, fr_ip, fr_pub, ir_keyfile)
+    fr_unit = _unit(tun_fr, ir_ip, ir_pub, fr_keyfile)
+    ir_nat, fr_nat, ir_nat_td, fr_nat_td = _carrier_nat_rules(
+        iface, tun_ir, tun_fr, frontend, cmt)
+    ir_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "which wg >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq wireguard-tools)",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p udp --dport {wg_port} -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + ir_nat
+    fr_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "which wg >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq wireguard-tools)",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p udp --dport {wg_port} -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + fr_nat
+    teardown_ir = [
+        f"iptables -D INPUT -p udp --dport {wg_port} -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + ir_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf {ir_keyfile}",
+        f"ip link del {iface} 2>/dev/null || true",
+    ]
+    teardown_fr = [
+        f"iptables -D INPUT -p udp --dport {wg_port} -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + fr_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf {fr_keyfile}",
+        f"ip link del {iface} 2>/dev/null || true",
+    ]
+    fw_ir = build_firewall_manifest(svc_name, pair_id, namespace, "WIREGUARD", "iran", iface, ir_cmds, cmt)
+    fw_fr = build_firewall_manifest(svc_name, pair_id, namespace, "WIREGUARD", "foreign", iface, fr_cmds, cmt)
+    return {
+        "protocol": "wireguard",
+        "iran_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(ir_unit, fw_ir["exec_line"]),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_ir["manifest_path"]: fw_ir["manifest"],
+            ir_keyfile: ir_priv + "\n",
+        },
+        "iran_units": [svc_name],
+        "foreign_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(fr_unit, fw_fr["exec_line"]),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_fr["manifest_path"]: fw_fr["manifest"],
+            fr_keyfile: fr_priv + "\n",
+        },
+        "foreign_units": [svc_name],
+        "iran_cmds": ir_cmds,
+        "foreign_cmds": fr_cmds,
+        "teardown_iran": teardown_ir,
+        "teardown_foreign": teardown_fr,
+    }
+
+
+def generate_wireguard_fec(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
+                           transport_port: int = None, mtu: int = 1420,
+                           namespace: str = "prod", tag: str = "", base: int = 10) -> dict:
+    """WireGuard behind a UDP FEC relay (2 data + 1 XOR parity, from
+    C-Tunnel's rudp-fec idea, implemented here in stdlib Python): for
+    paths that pass UDP but lose a few percent of packets, where plain
+    WireGuard's handshake and data stall on every loss. The tunnel's
+    peer is its own loopback relay, never the public internet: the
+    relay forwards to the peer relay, which decodes and delivers to the
+    peer's WireGuard listen port. Bench FEC ports differ from prod
+    ones, because a sweep benches while the live tunnel is up.
+
+    Not in the wizard's first-tunnel chain: FEC costs a parity packet
+    per two data packets, so it is a lossy-path specialist the sweep
+    scores and the healer switches to, not a default pick."""
+    ptok = pair_token(pair_id, tag)
+    iface = carrier_iface("wireguard-fec", pair_id, namespace, tag)
+    tun_ir, tun_fr = carrier_inner_pair("wireguard-fec", pair_id, namespace, base)
+    wg_port = int(transport_port) if transport_port else 51820 + (pair_id % 1000)
+    if namespace == "bench":
+        fec_local = 27000 + (pair_id % 1000)
+        fec_peer = 28000 + (pair_id % 1000)
+    else:
+        fec_local = 25000 + (pair_id % 1000)
+        fec_peer = 26000 + (pair_id % 1000)
+    cmt = generate_firewall_comment(f"{pair_id}-{namespace}", "WIREGUARD-FEC")
+    svc_name = f"best-tunnel-{namespace}-{ptok}-wireguard-fec"
+    proxy_svc = f"best-tunnel-{namespace}-{ptok}-fec-proxy"
+    sysctl_conf = f"/etc/sysctl.d/99-best-tunnel-{namespace}-{ptok}.conf"
+    sysctl_body = "net.ipv4.ip_forward = 1\n"
+    proxy_path = f"/usr/local/bin/best-tunnel-fec-proxy-{ptok}-{namespace}.py"
+    ir_priv, ir_pub = _wg_keypair()
+    fr_priv, fr_pub = _wg_keypair()
+    ir_keyfile = f"/etc/best-tunnel/wireguard/{namespace}-{ptok}-fec-iran.key"
+    fr_keyfile = f"/etc/best-tunnel/wireguard/{namespace}-{ptok}-fec-foreign.key"
+
+    def _wg_unit(local_tun, peer_pub, keyfile):
+        return f"""[Unit]
+Description=Best Tunnel Carrier ({namespace.title()} Pair {pair_id})
+After=network-online.target
+After={proxy_svc}.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/sbin/ip link del {iface}
+ExecStart=/sbin/ip link add {iface} type wireguard
+ExecStart=/usr/bin/wg set {iface} private-key {keyfile} listen-port {wg_port} peer {peer_pub} allowed-ips 0.0.0.0/0 endpoint 127.0.0.1:{fec_local} persistent-keepalive 25
+ExecStart=/sbin/ip addr add {local_tun}/30 dev {iface}
+ExecStart=/sbin/ip link set {iface} up mtu {mtu}
+ExecStart=/sbin/sysctl -w net.ipv4.conf.{iface}.rp_filter=0
+ExecStop=-/sbin/ip link del {iface}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    def _proxy_unit(peer_ip):
+        return f"""[Unit]
+Description=Best Tunnel FEC Relay ({namespace.title()} Pair {pair_id})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/python3 {proxy_path} --local 127.0.0.1:{fec_local} --peer-listen 0.0.0.0:{fec_peer} --peer {peer_ip}:{fec_peer} --deliver 127.0.0.1:{wg_port}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    ir_unit = _wg_unit(tun_ir, fr_pub, ir_keyfile)
+    fr_unit = _wg_unit(tun_fr, ir_pub, fr_keyfile)
+    ir_nat, fr_nat, ir_nat_td, fr_nat_td = _carrier_nat_rules(
+        iface, tun_ir, tun_fr, frontend, cmt)
+    ir_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "which wg >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq wireguard-tools)",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p udp --dport {fec_peer} -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + ir_nat
+    fr_cmds = [
+        "which iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)",
+        "which wg >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq wireguard-tools)",
+        "sysctl -w net.ipv4.ip_forward=1",
+        f"iptables -I INPUT 1 -p udp --dport {fec_peer} -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT",
+    ] + fr_nat
+    teardown_ir = [
+        f"iptables -D INPUT -p udp --dport {fec_peer} -s {fr_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + ir_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"systemctl stop {proxy_svc} 2>/dev/null || true",
+        f"systemctl disable {proxy_svc} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service /etc/systemd/system/{proxy_svc}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf {ir_keyfile} {proxy_path}",
+        f"ip link del {iface} 2>/dev/null || true",
+    ]
+    teardown_fr = [
+        f"iptables -D INPUT -p udp --dport {fec_peer} -s {ir_ip}/32 -m comment --comment \"{cmt}\" -j ACCEPT 2>/dev/null || true",
+    ] + fr_nat_td + [
+        f"systemctl stop {svc_name} 2>/dev/null || true",
+        f"systemctl disable {svc_name} 2>/dev/null || true",
+        f"systemctl stop {proxy_svc} 2>/dev/null || true",
+        f"systemctl disable {proxy_svc} 2>/dev/null || true",
+        f"rm -f /etc/systemd/system/{svc_name}.service /etc/systemd/system/{proxy_svc}.service {sysctl_conf} /etc/sysctl.d/99-best-tunnel.conf {fr_keyfile} {proxy_path}",
+        f"ip link del {iface} 2>/dev/null || true",
+    ]
+    fw_ir = build_firewall_manifest(svc_name, pair_id, namespace, "WIREGUARD-FEC", "iran", iface, ir_cmds, cmt)
+    fw_fr = build_firewall_manifest(svc_name, pair_id, namespace, "WIREGUARD-FEC", "foreign", iface, fr_cmds, cmt)
+    return {
+        "protocol": "wireguard-fec",
+        "iran_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(ir_unit, fw_ir["exec_line"]),
+            f"/etc/systemd/system/{proxy_svc}.service": _proxy_unit(fr_ip),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_ir["manifest_path"]: fw_ir["manifest"],
+            ir_keyfile: ir_priv + "\n",
+            proxy_path: _FEC_PROXY_TEMPLATE,
+        },
+        "iran_units": [svc_name, proxy_svc],
+        "foreign_files": {
+            f"/etc/systemd/system/{svc_name}.service": _add_fw_exec(fr_unit, fw_fr["exec_line"]),
+            f"/etc/systemd/system/{proxy_svc}.service": _proxy_unit(ir_ip),
+            sysctl_conf: sysctl_body,
+            FW_REAPPLY_PATH: FW_REAPPLY_SCRIPT,
+            fw_fr["manifest_path"]: fw_fr["manifest"],
+            fr_keyfile: fr_priv + "\n",
+            proxy_path: _FEC_PROXY_TEMPLATE,
+        },
+        "foreign_units": [svc_name, proxy_svc],
+        "iran_cmds": ir_cmds,
+        "foreign_cmds": fr_cmds,
+        "teardown_iran": teardown_ir,
+        "teardown_foreign": teardown_fr,
+    }
+
+
+_TCP_LANES_TEMPLATE = '''#!/usr/bin/env python3
+"""Parallel-TCP reverse carrier (generated file): 8 TCP streams that
+look like TLS records, from C-Tunnel's revcarrier idea.
+
+Shape, mirroring chisel-wss: the server runs on Iran, the client on
+the foreign host dials in, and the server's frontend port is the
+reverse-forward bind: a connection to Iran:frontend is carried through
+one lane to the foreign host's backend port. The difference from a
+single-stream overlay is blast radius: one dead lane drops only the
+connections stuck to it (about one eighth), and the client redials
+that lane, while the other seven keep carrying traffic.
+
+Framing, stated honestly: each frame travels as a TLS ApplicationData
+record shape (0x17, 0x0303, length) carrying a small header
+(connection id, frame type, payload). That is camouflage shaping, not
+TLS: there is no handshake and no certificate, and a middlebox that
+validates TLS would not be fooled. The lane's authentication is a
+token frame: the first frame on a fresh lane must carry the token the
+generator provisioned as a file (server) or environment (client), and
+a lane that fails it is closed before it carries anything. Per
+connection, every frame uses the one lane the connection was assigned
+(stickiness), so order within a connection is preserved without any
+reordering buffer. Heartbeats keep NAT and firewall state alive every
+10 s; a lane silent for 35 s is dropped and redialled.
+"""
+
+import argparse
+import itertools
+import os
+import socket
+import struct
+import sys
+import threading
+import time
+
+FTYPE_AUTH = 0
+FTYPE_OPEN = 1
+FTYPE_DATA = 2
+FTYPE_CLOSE = 3
+FTYPE_HEARTBEAT = 4
+
+TLS_HDR = struct.Struct(">B B B H")
+FRAME_HDR = struct.Struct(">H B")
+HEARTBEAT_SEC = 10.0
+IDLE_TIMEOUT_SEC = 35.0
+CHUNK = 16384
+
+
+def frame_bytes(conn_id, ftype, payload):
+    body = FRAME_HDR.pack(conn_id, ftype) + payload
+    return TLS_HDR.pack(0x17, 0x03, 0x03, len(body)) + body
+
+
+def read_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def read_frame(sock):
+    hdr = read_exact(sock, TLS_HDR.size)
+    if hdr is None:
+        return None
+    rtype, vmaj, vmin, length = TLS_HDR.unpack(hdr)
+    if (rtype, vmaj, vmin) != (0x17, 0x03, 0x03):
+        return None
+    body = read_exact(sock, length)
+    if body is None or len(body) < FRAME_HDR.size:
+        return None
+    conn_id, ftype = FRAME_HDR.unpack(body[:FRAME_HDR.size])
+    return conn_id, ftype, body[FRAME_HDR.size:]
+
+
+def send_frame(sock, lock, conn_id, ftype, payload):
+    data = frame_bytes(conn_id, ftype, payload)
+    with lock:
+        sock.sendall(data)
+
+
+class Lane:
+    def __init__(self, sock):
+        self.sock = sock
+        self.lock = threading.Lock()
+        self.last_recv = time.monotonic()
+        self.last_send = time.monotonic()
+        self.conns = set()
+
+    def send(self, conn_id, ftype, payload):
+        send_frame(self.sock, self.lock, conn_id, ftype, payload)
+        self.last_send = time.monotonic()
+
+
+def serve(lanes_addr, frontend_addr, token, ready=None, stop=None):
+    lanes = {}
+    lanes_lock = threading.Lock()
+    lane_counter = itertools.count()
+    conns = {}
+    conns_lock = threading.Lock()
+
+    def close_lane(lane_id):
+        with lanes_lock:
+            lane = lanes.pop(lane_id, None)
+        if lane is None:
+            return
+        try:
+            lane.sock.close()
+        except OSError:
+            pass
+        with conns_lock:
+            doomed = [cid for cid in lane.conns if cid in conns]
+            for cid in doomed:
+                try:
+                    conns[cid].close()
+                except OSError:
+                    pass
+                del conns[cid]
+
+    def lane_reader(lane_id, lane):
+        lane.sock.settimeout(1.0)
+        while stop is None or not stop.is_set():
+            try:
+                frame = read_frame(lane.sock)
+            except (OSError, socket.timeout):
+                frame = "timeout"
+            if frame == "timeout":
+                now = time.monotonic()
+                if now - lane.last_send > HEARTBEAT_SEC:
+                    try:
+                        lane.send(0, FTYPE_HEARTBEAT, b"")
+                    except OSError:
+                        break
+                if now - lane.last_recv > IDLE_TIMEOUT_SEC:
+                    break
+                continue
+            if frame is None:
+                break
+            lane.last_recv = time.monotonic()
+            conn_id, ftype, payload = frame
+            if ftype == FTYPE_HEARTBEAT:
+                continue
+            with conns_lock:
+                target = conns.get(conn_id)
+            if target is None:
+                continue
+            try:
+                if ftype == FTYPE_DATA:
+                    target.sendall(payload)
+                elif ftype == FTYPE_CLOSE:
+                    target.close()
+                    with conns_lock:
+                        conns.pop(conn_id, None)
+            except OSError:
+                with conns_lock:
+                    conns.pop(conn_id, None)
+        close_lane(lane_id)
+
+    def lane_acceptor():
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(lanes_addr)
+        srv.listen(64)
+        srv.settimeout(1.0)
+        if ready is not None:
+            ready["lanes"] = srv.getsockname()
+        while stop is None or not stop.is_set():
+            try:
+                sock, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            sock.settimeout(5.0)
+            frame = None
+            try:
+                frame = read_frame(sock)
+            except OSError:
+                frame = None
+            if frame is None or frame[1] != FTYPE_AUTH or frame[2] != token:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                continue
+            lane_id = next(lane_counter)
+            lane = Lane(sock)
+            with lanes_lock:
+                lanes[lane_id] = lane
+            threading.Thread(target=lane_reader, args=(lane_id, lane), daemon=True).start()
+
+    def pick_lane():
+        with lanes_lock:
+            live = list(lanes.values())
+        if not live:
+            return None
+        pick_lane.counter = (pick_lane.counter + 1) % len(live)
+        return live[pick_lane.counter]
+    pick_lane.counter = -1
+
+    def frontend_pump(conn, conn_id, lane):
+        try:
+            while True:
+                data = conn.recv(CHUNK)
+                if not data:
+                    break
+                lane.send(conn_id, FTYPE_DATA, data)
+        except OSError:
+            pass
+        finally:
+            try:
+                lane.send(conn_id, FTYPE_CLOSE, b"")
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            with conns_lock:
+                conns.pop(conn_id, None)
+            lane.conns.discard(conn_id)
+
+    def frontend_acceptor():
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(frontend_addr)
+        srv.listen(128)
+        srv.settimeout(1.0)
+        if ready is not None:
+            ready["frontend"] = srv.getsockname()
+        conn_counter = itertools.count(1)
+        while stop is None or not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            lane = pick_lane()
+            if lane is None:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            conn_id = next(conn_counter) % 65536
+            with conns_lock:
+                conns[conn_id] = conn
+            lane.conns.add(conn_id)
+            try:
+                lane.send(conn_id, FTYPE_OPEN, b"")
+            except OSError:
+                with conns_lock:
+                    conns.pop(conn_id, None)
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            threading.Thread(target=frontend_pump, args=(conn, conn_id, lane), daemon=True).start()
+
+    threading.Thread(target=lane_acceptor, daemon=True).start()
+    frontend_acceptor()
+
+
+def run_client(remote_addr, backend_addr, token, streams=8, stop=None):
+    backends = {}
+    backends_lock = threading.Lock()
+
+    def close_lane_conns(lane):
+        with backends_lock:
+            doomed = [cid for cid in lane.conns if cid in backends]
+            for cid in doomed:
+                try:
+                    backends[cid][0].close()
+                except OSError:
+                    pass
+                del backends[cid]
+
+    def backend_pump(conn, conn_id, lane):
+        try:
+            while True:
+                data = conn.recv(CHUNK)
+                if not data:
+                    break
+                lane.send(conn_id, FTYPE_DATA, data)
+        except OSError:
+            pass
+        finally:
+            try:
+                lane.send(conn_id, FTYPE_CLOSE, b"")
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            with backends_lock:
+                backends.pop(conn_id, None)
+            lane.conns.discard(conn_id)
+
+    def lane_loop():
+        backoff = 1.0
+        while stop is None or not stop.is_set():
+            try:
+                sock = socket.create_connection(remote_addr, timeout=10)
+            except OSError:
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 5.0)
+                continue
+            backoff = 1.0
+            lane = Lane(sock)
+            try:
+                lane.send(0, FTYPE_AUTH, token)
+            except OSError:
+                continue
+            sock.settimeout(1.0)
+            dead = False
+            while stop is None or not stop.is_set() and not dead:
+                try:
+                    frame = read_frame(sock)
+                except (OSError, socket.timeout):
+                    frame = "timeout"
+                if frame == "timeout":
+                    now = time.monotonic()
+                    if now - lane.last_send > HEARTBEAT_SEC:
+                        try:
+                            lane.send(0, FTYPE_HEARTBEAT, b"")
+                        except OSError:
+                            dead = True
+                    if now - lane.last_recv > IDLE_TIMEOUT_SEC:
+                        dead = True
+                    continue
+                if frame is None:
+                    dead = True
+                    continue
+                lane.last_recv = time.monotonic()
+                conn_id, ftype, payload = frame
+                if ftype == FTYPE_HEARTBEAT:
+                    continue
+                if ftype == FTYPE_OPEN:
+                    try:
+                        conn = socket.create_connection(backend_addr, timeout=10)
+                    except OSError:
+                        continue
+                    with backends_lock:
+                        backends[conn_id] = (conn, lane)
+                    lane.conns.add(conn_id)
+                    threading.Thread(target=backend_pump, args=(conn, conn_id, lane),
+                                     daemon=True).start()
+                    continue
+                with backends_lock:
+                    entry = backends.get(conn_id)
+                if entry is None:
+                    continue
+                conn = entry[0]
+                try:
+                    if ftype == FTYPE_DATA:
+                        conn.sendall(payload)
+                    elif ftype == FTYPE_CLOSE:
+                        conn.close()
+                        with backends_lock:
+                            backends.pop(conn_id, None)
+                except OSError:
+                    with backends_lock:
+                        backends.pop(conn_id, None)
+            close_lane_conns(lane)
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    threads = [threading.Thread(target=lane_loop, daemon=True) for _ in range(streams)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", required=True, choices=("server", "client"))
+    ap.add_argument("--listen", help="server lanes listen, host:port")
+    ap.add_argument("--frontend", help="server reverse-forward bind, host:port")
+    ap.add_argument("--token-file", help="server token file path")
+    ap.add_argument("--remote", help="client dial target, host:port")
+    ap.add_argument("--backend", help="client local deliver, host:port")
+    ap.add_argument("--streams", type=int, default=8)
+    args = ap.parse_args()
+
+    def _addr(text):
+        host, port = text.rsplit(":", 1)
+        return host, int(port)
+
+    if args.mode == "server":
+        with open(args.token_file, "rb") as fh:
+            token = fh.read().strip()
+        serve(_addr(args.listen), _addr(args.frontend), token)
+    else:
+        token = os.environ["LANES_TOKEN"].encode()
+        run_client(_addr(args.remote), _addr(args.backend), token, streams=args.streams)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def generate_tcp_lanes(pair_id: int, ir_ip: str, fr_ip: str, frontend: int,
+                       transport_port: int = None, namespace: str = "prod",
+                       backend_port: int = None, tag: str = "", base: int = 10) -> dict:
+    """Parallel-TCP reverse carrier, from C-Tunnel's revcarrier idea,
+    implemented here in stdlib Python: 8 TCP streams in TLS-record
+    shapes between a server on Iran and a client on the foreign host,
+    with per-connection stickiness, a token-authenticated first frame,
+    10 s heartbeats and a 35 s idle drop with redial. One dead lane
+    drops about an eighth of the connections instead of all of them.
+
+    The transport port is per-pair (29000 + pair id) rather than one
+    fixed default, so two pairs on one master can both run tcp-lanes;
+    benches pass the shared bench transport port explicitly, as usual.
+    Like the other overlays it adds no iptables rules: the server
+    process itself binds the frontend (reverse forward) and the lanes
+    port, exactly as chisel's server does."""
+    ptok = pair_token(pair_id, tag)
+    backend = int(backend_port) if backend_port else frontend
+    transport = int(transport_port) if transport_port else 29000 + (pair_id % 1000)
+    token = rnd(32)
+    svc_ir = f"best-tunnel-{namespace}-{ptok}-tcp-lanes-server"
+    svc_fr = f"best-tunnel-{namespace}-{ptok}-tcp-lanes-client"
+    script_path = f"/usr/local/bin/best-tunnel-tcp-lanes-{ptok}-{namespace}.py"
+    token_path = f"/etc/best-tunnel/tcp-lanes/{namespace}-token-{ptok}"
+    env_path = f"/etc/best-tunnel/tcp-lanes/{namespace}-env-{ptok}"
+    ir_unit = f"""[Unit]
+Description=Best Tunnel TCP Lanes Server ({namespace.title()} Pair {pair_id})
+After=network-online.target
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/python3 {script_path} --mode server --listen 0.0.0.0:{transport} --frontend 0.0.0.0:{frontend} --token-file {token_path}
+[Install]
+WantedBy=multi-user.target
+"""
+    fr_unit = f"""[Unit]
+Description=Best Tunnel TCP Lanes Client ({namespace.title()} Pair {pair_id})
+After=network-online.target
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+EnvironmentFile={env_path}
+ExecStart=/usr/bin/python3 {script_path} --mode client --remote {ir_ip}:{transport} --backend 127.0.0.1:{backend} --streams 8
+[Install]
+WantedBy=multi-user.target
+"""
+    return {
+        "protocol": "tcp-lanes",
+        "iran_files": {
+            token_path: token + "\n",
+            script_path: _TCP_LANES_TEMPLATE,
+            f"/etc/systemd/system/{svc_ir}.service": ir_unit,
+        },
+        "iran_units": [svc_ir],
+        "foreign_files": {
+            env_path: f"LANES_TOKEN={token}\n",
+            script_path: _TCP_LANES_TEMPLATE,
+            f"/etc/systemd/system/{svc_fr}.service": fr_unit,
+        },
+        "foreign_units": [svc_fr],
+        "iran_cmds": ["mkdir -p /etc/best-tunnel/tcp-lanes"],
+        "foreign_cmds": ["mkdir -p /etc/best-tunnel/tcp-lanes"],
+        "teardown_iran": [f"systemctl stop {svc_ir} 2>/dev/null || true",
+                          f"systemctl disable {svc_ir} 2>/dev/null || true",
+                          f"rm -f /etc/systemd/system/{svc_ir}.service {token_path} {script_path}"],
+        "teardown_foreign": [f"systemctl stop {svc_fr} 2>/dev/null || true",
+                             f"systemctl disable {svc_fr} 2>/dev/null || true",
+                             f"rm -f /etc/systemd/system/{svc_fr}.service {env_path} {script_path}"],
+    }
 
 
 def _esp_spi(pair_id: int, namespace: str, direction: str) -> str:
@@ -2732,6 +3774,166 @@ WantedBy=multi-user.target
 # (10.10/10.11) nor ESP (10.12/10.13). MTU 1280 follows the reference
 # spoof tunnel's WireGuard guidance for a forged-source path.
 
+_FEC_PROXY_TEMPLATE = '''#!/usr/bin/env python3
+"""UDP FEC relay (generated file): 2 data packets + 1 XOR parity packet.
+
+One process per host serves both directions of one tunnel. It owns two
+sockets: a loopback socket where the local tunnel endpoint sends (the
+tunnel's configured peer is this relay, on loopback), and a public
+socket where the peer relay's packets arrive. Data packets are always
+forwarded immediately - the parity packet is extra, never a delay - so
+a healthy path pays only the 50% parity overhead on lossy paths, and
+the decode side delivers data the moment it arrives and reconstructs a
+missing sibling from its parity packet when one arrives.
+
+Wire format, 9-byte header + payload: group id (uint32), index
+(0/1 = data, 2 = parity), length of data packet 0, length of data
+packet 1. A parity payload is the XOR of the two data payloads padded
+with zeros to the longer length, so the missing packet is recovered as
+parity XOR the surviving sibling, truncated to its own length. Groups
+live 200 ms on the decode side and are then dropped: a late parity
+packet must never resurrect traffic the tunnel already gave up on.
+"""
+
+import argparse
+import selectors
+import socket
+import struct
+import sys
+import time
+
+HDR = struct.Struct(">I B H H")
+GROUP_TTL = 0.2
+DATA_PER_GROUP = 2
+
+
+def xor_bytes(a, b):
+    n = max(len(a), len(b))
+    a = a + b"\\x00" * (n - len(a))
+    b = b + b"\\x00" * (n - len(b))
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def encode_parity(p0, p1):
+    return xor_bytes(p0, p1), len(p0), len(p1)
+
+
+def decode_missing(parity, present, present_index, missing_len):
+    return xor_bytes(parity, present)[:missing_len]
+
+
+class Relay:
+    def __init__(self, local_addr, peer_listen_addr, peer_addr, deliver_addr):
+        self.local_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.local_sock.bind(local_addr)
+        self.local_sock.setblocking(False)
+        self.peer_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.peer_sock.bind(peer_listen_addr)
+        self.peer_sock.setblocking(False)
+        self.send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.peer_addr = peer_addr
+        self.deliver_addr = deliver_addr
+        self.next_group = 0
+        self.pending = None  # (group id, first data payload) awaiting its sibling
+        self.groups = {}  # group id -> {index: payload, "delivered": set, "expiry": float}
+
+    def _send_data(self, gid, index, payload, len0, len1):
+        self.send_sock.sendto(HDR.pack(gid, index, len0, len1) + payload, self.peer_addr)
+
+    def on_local(self, payload):
+        gid = self.next_group
+        if self.pending is None:
+            self._send_data(gid, 0, payload, len(payload), 0)
+            self.pending = (gid, payload)
+        else:
+            pgid, p0 = self.pending
+            self.pending = None
+            self._send_data(pgid, 1, payload, len(p0), len(payload))
+            parity, len0, len1 = encode_parity(p0, payload)
+            self.send_sock.sendto(HDR.pack(pgid, 2, len0, len1) + parity, self.peer_addr)
+            self.next_group = (pgid + 1) & 0xFFFFFFFF
+
+    def _try_reconstruct(self, group):
+        # Either arrival order can complete a group: parity first then
+        # the surviving sibling, or the sibling first then parity.
+        parity = group.get("parity")
+        if parity is None:
+            return
+        payload, len0, len1 = parity
+        missing = [i for i in (0, 1) if i not in group["delivered"]]
+        if len(missing) != 1:
+            return
+        i = missing[0]
+        sibling = group.get(1 - i)
+        if sibling is None:
+            return
+        want = (len0, len1)[i]
+        recovered = decode_missing(payload, sibling, 1 - i, want)
+        self.send_sock.sendto(recovered, self.deliver_addr)
+        group["delivered"].add(i)
+
+    def on_peer(self, packet):
+        if len(packet) < HDR.size:
+            return
+        gid, index, len0, len1 = HDR.unpack(packet[:HDR.size])
+        payload = packet[HDR.size:]
+        now = time.monotonic()
+        group = self.groups.get(gid)
+        if group is None:
+            group = {"delivered": set(), "expiry": now + GROUP_TTL}
+            self.groups[gid] = group
+        if index in (0, 1):
+            if index not in group["delivered"]:
+                self.send_sock.sendto(payload, self.deliver_addr)
+                group["delivered"].add(index)
+            group[index] = payload
+            self._try_reconstruct(group)
+        elif index == 2:
+            group["parity"] = (payload, len0, len1)
+            self._try_reconstruct(group)
+        for stale in [g for g, state in self.groups.items() if state["expiry"] < now]:
+            del self.groups[stale]
+
+    def run_forever(self):
+        sel = selectors.DefaultSelector()
+        sel.register(self.local_sock, selectors.EVENT_READ, "local")
+        sel.register(self.peer_sock, selectors.EVENT_READ, "peer")
+        print("fec relay up", flush=True)
+        while True:
+            for key, _ in sel.select(timeout=0.05):
+                try:
+                    packet, _ = key.fileobj.recvfrom(65535)
+                except OSError:
+                    continue
+                if key.data == "local":
+                    self.on_local(packet)
+                else:
+                    self.on_peer(packet)
+            now = time.monotonic()
+            for stale in [g for g, state in self.groups.items() if state["expiry"] < now]:
+                del self.groups[stale]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--local", required=True, help="loopback listen, host:port (from the local tunnel)")
+    ap.add_argument("--peer-listen", required=True, help="public listen, host:port (from the peer relay)")
+    ap.add_argument("--peer", required=True, help="peer relay, host:port")
+    ap.add_argument("--deliver", required=True, help="local tunnel listen, host:port")
+    args = ap.parse_args()
+
+    def _addr(text):
+        host, port = text.rsplit(":", 1)
+        return host, int(port)
+
+    Relay(_addr(args.local), _addr(args.peer_listen), _addr(args.peer), _addr(args.deliver)).run_forever()
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
 _SPOOF_PIPE_TEMPLATE = '''#!/usr/bin/env python3
 """Spoof UDP pipe daemon (generated file).
 
@@ -2976,6 +4178,11 @@ WantedBy=multi-user.target
 GENERATORS = {
     "GRE": generate_gre,
     "ESP": generate_esp,
+    "fou-gre": generate_fou_gre,
+    "ipip": generate_ipip,
+    "wireguard": generate_wireguard,
+    "wireguard-fec": generate_wireguard_fec,
+    "tcp-lanes": generate_tcp_lanes,
     "backhaul-wss": generate_backhaul_wss,
     "rathole-noise": generate_rathole_noise,
     "chisel-wss": generate_chisel_wss,
@@ -2992,6 +4199,11 @@ GENERATORS = {
 BASE_PROTOCOLS = [
     "GRE",
     "ESP",
+    "fou-gre",
+    "ipip",
+    "wireguard",
+    "wireguard-fec",
+    "tcp-lanes",
     "backhaul-wss",
     "rathole-noise",
     "chisel-wss",
@@ -3025,8 +4237,11 @@ def is_singbox_enabled() -> bool:
 
 def get_supported_protocols() -> list[str]:
     """Single Source of Truth for active supported protocols.
-    BASE_PROTOCOLS (11: hysteria2 graduated 2026-10-24, spoof-wireguard
-    gated 2026-10-29) plus SINGBOX_PROTOCOLS (2), unless the operator
+    BASE_PROTOCOLS (16: hysteria2 graduated 2026-10-24, spoof-wireguard
+    gated 2026-10-29, fou-gre/ipip/wireguard added 2026-11-02 from
+    C-Tunnel's kernel list, wireguard-fec added the same day for lossy
+    paths, tcp-lanes added the same day from C-Tunnel's revcarrier)
+    plus SINGBOX_PROTOCOLS (2), unless the operator
     re-quarantined sing-box with BEST_TUNNEL_DISABLE_SINGBOX=1.
 
     Spoof is probe-gated, not score-gated: a pair whose spoof probe did
@@ -3087,6 +4302,15 @@ DESTINATION_MECHANISM = {
     "GRE": "GRE (IP proto 47): addressing and routing only, no cryptographic peer authentication",
     "ESP": "manually keyed ESP SA (IP proto 50): the ICV proves the peer holds the key, and the key is "
            "symmetric, so it identifies nobody - confidentiality of the envelope, not of the destination",
+    "fou-gre": "GRE inside UDP (FOU): addressing and routing only, no cryptographic peer authentication",
+    "ipip": "IPv4-in-IPv4 (IP proto 4): addressing and routing only, no cryptographic peer authentication",
+    "wireguard": "WireGuard (Noise, X25519): the peer's static public key is pinned in the unit, so the tunnel "
+                 "only ever talks to the peer that holds the matching private key",
+    "wireguard-fec": "WireGuard (Noise, X25519) behind a loopback FEC relay: the peer's static public key is "
+                     "pinned in the unit, and the relay adds a parity packet per two data packets",
+    "tcp-lanes": "8 parallel TCP streams in TLS-record-shaped frames, client authenticated by a token "
+                 "frame; the record shape is camouflage, not TLS, and a lane that fails "
+                 "authentication is closed before it carries anything",
     "kcptun": "shared-key KCP: the key encrypts the channel, it does not identify a destination",
     "xray-reverse": "vmess inter-connect with security=none: no TLS layer, no peer authentication",
     "singbox-ss-2022": "Shadowsocks-2022 pre-shared key: a key both sides hold, so no destination identity",
@@ -3228,6 +4452,16 @@ BACKEND_TARGETS = {
             "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
     "ESP": ("foreign_files", r'-i\s+espp\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
             "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
+    "fou-gre": ("foreign_files", r'-i\s+foug\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
+                "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
+    "ipip": ("foreign_files", r'-i\s+ipip\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
+             "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
+    "wireguard": ("foreign_files", r'-i\s+wg\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
+                  "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
+    "wireguard-fec": ("foreign_files", r'-i\s+wgf\d+\s+-p\s+tcp\s+--dport\s+(?P<backend>\d+)',
+                      "foreign", "layer-3 delivery: the carrier's own interface, INPUT ACCEPT to the host itself"),
+    "tcp-lanes": ("foreign_files", r'--backend 127\.0\.0\.1:(?P<backend>\d+)',
+                  "foreign", "lanes client delivers to loopback"),
 }
 
 # These two do not deliver to a local port at all: they are servers whose best outbound is `direct`, so the
@@ -3241,7 +4475,8 @@ BACKEND_EGRESS_PROXIES = ("singbox-vless-reality", "singbox-ss-2022")
 # delivery port means changing the DNAT destination on Iran *and* the INPUT rule on Foreign *and* the
 # firewall manifest *and* their mirrored deletes, which is its own change with its own hardware A/B.
 BACKEND_PORT_DECLARABLE = ("xray-reverse", "chisel-wss", "wstunnel-v10", "frp-TLS", "kcptun",
-                           "rathole-noise", "backhaul-wss", "hysteria2", "bale-webrtc", "spoof-wireguard")
+                           "rathole-noise", "backhaul-wss", "hysteria2", "bale-webrtc", "spoof-wireguard",
+                           "tcp-lanes")
 
 
 def backend_target(protocol: str, plan: dict) -> dict:

@@ -20,7 +20,15 @@ SERVER_COMMAND = (
     "awk '{print \"UP \" $1}' /proc/uptime"
 )
 
-CARRIER_IFACE = {"GRE": "grep1", "ESP": "espp1"}
+def carrier_iface(protocol: str, pair_id: int) -> str | None:
+    # The carrier interface is named after the pair, not fixed to pair 1:
+    # a pair-1-only lookup left every later pair's counters unread, so
+    # their traffic totals never moved.
+    if protocol == "GRE":
+        return "grep%d" % pair_id
+    if protocol == "ESP":
+        return "espp%d" % pair_id
+    return None
 
 
 def parse_server_metrics(output: str) -> dict:
@@ -59,7 +67,8 @@ def collect_pair(executor, pair: dict) -> dict:
         rc, out, _ = executor.run(f"ping -c 2 -W 2 {inner}", timeout=30)
         if rc == 0:
             data["latency_ms"] = parse_ping_avg(out)
-    iface = CARRIER_IFACE.get(pair.get("current_protocol") or "")
+    iface = carrier_iface(pair.get("current_protocol") or "",
+                          pair.get("id", 1))
     if iface:
         rc, out, _ = executor.run(
             f"cat /sys/class/net/{iface}/statistics/rx_bytes "

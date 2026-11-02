@@ -49,9 +49,10 @@ DEFAULT_PROTOCOL = "GRE"
 # own evaluation; the sweep still ranks it afterwards. Spoof and Bale
 # are excluded for the same reason as everywhere else (probe-gated
 # and parked).
-FALLBACK_ORDER = ["GRE", "ESP", "backhaul-wss", "rathole-noise",
+FALLBACK_ORDER = ["GRE", "ESP", "fou-gre", "ipip", "wireguard",
+                  "backhaul-wss", "rathole-noise",
                   "frp-TLS", "chisel-wss", "xray-reverse", "wstunnel-v10",
-                  "singbox-ss-2022", "kcptun", "hysteria2"]
+                  "singbox-ss-2022", "kcptun", "hysteria2", "tcp-lanes"]
 
 
 def parse_known_hosts(path: str) -> dict:

@@ -72,7 +72,7 @@ def test_first_choice_succeeds_without_fallback():
 
 def test_gre_esp_fail_backhaul_succeeds():
     def measure(p):
-        if p in ("GRE", "ESP"):
+        if p in ("GRE", "ESP", "fou-gre", "ipip", "wireguard"):
             raise _verdict(p)
         if p == "backhaul-wss":
             return {"score": 85.48, "base_rtt_ms": 85.0}
@@ -81,7 +81,7 @@ def test_gre_esp_fail_backhaul_succeeds():
     out = _run(fakes)
     assert out["protocol"] == "backhaul-wss"
     assert out["score"] == 85.48
-    assert out["tried"] == ["GRE", "ESP", "backhaul-wss"]
+    assert out["tried"] == ["GRE", "ESP", "fou-gre", "ipip", "wireguard", "backhaul-wss"]
     assert fakes.deployed == ["backhaul-wss"]
     assert fakes.recorded == [{"backhaul-wss": 85.48}]
 

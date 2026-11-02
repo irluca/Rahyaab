@@ -48,6 +48,10 @@ It installs the hub, enables BBR, asks for a domain or IP certificate, registers
 
 Notes: the join code is single-use — printing a new one invalidates the old one, and you can print a fresh one from Manage in the installer menu. The browser warns once about the self-signed IP certificate; compare its fingerprint with the one the installer printed. Re-running the installer is safe: it never overwrites the database or existing certificates.
 
+**Verified releases.** `bash scripts/build-release.sh` builds a versioned tarball plus its `SHA256SUMS`; publish both as assets of a GitHub release. Installers then run `bash install.sh --release vX.Y.Z`, which downloads the tarball and its checksums and refuses to install anything when a hash does not match. The default branch download additionally checks the archive is intact before extracting it.
+
+**Desktop demo panel.** `python3 -m hub.main --demo` serves the dashboard on local-only HTTP with three simulated pairs (healthy carrier, healthy overlay, down) and a demo login, so visual changes can be previewed without touching a live server. Job buttons fail against the fake hosts by design — the demo previews layout, it does not run tunnels.
+
 **A second master sharing the same nodes.** One foreign node can serve two masters at once (for example, an old and a new Iran server): each hub carries its own short tag and its own inner address base, so the second hub's units, interfaces and inners never overwrite or misroute the first hub's. The first hub uses base 10; a new hub installed from this installer gets base 20 by default, and `--inner-base 30` (any even number from 12 to 250) picks another. Before deploying, the wizard reads both hosts and refuses the join — naming the colliding interface, address or unit — instead of breaking the tunnel that already owns them.
 
 **Alternative: full setup from the master, one command:**
@@ -62,9 +66,11 @@ This installs the hub, the node (over the hub key — the node's root password i
 
 | Type | Protocols |
 |---|---|
-| Carriers | `GRE`, `ESP` |
-| Overlays | `backhaul-wss`, `rathole-noise`, `chisel-wss`, `frp-TLS`, `wstunnel-v10`, `xray-reverse`, `kcptun`, `hysteria2` |
-| Quarantined | `sing-box` VLESS-REALITY, SS-2022 — disabled unless explicitly enabled |
+| Carriers | `GRE`, `ESP`, `fou-gre` (GRE over UDP), `ipip`, `wireguard`, `wireguard-fec` (WireGuard behind a 2+1 XOR parity relay, for lossy paths) |
+| Overlays | `backhaul-wss`, `rathole-noise`, `chisel-wss`, `frp-TLS`, `wstunnel-v10`, `xray-reverse`, `kcptun`, `hysteria2`, `tcp-lanes` (8 parallel TLS-record-shaped TCP streams, reverse mode) |
+| Sing-box | VLESS-REALITY, SS-2022 — first-class since Oct 24, 2026; `BEST_TUNNEL_DISABLE_SINGBOX=1` re-quarantines them |
+
+6to4 is deliberately not a carrier: SIT encapsulates IPv6 only, and the bench/probe/DNAT path is IPv4-only.
 
 ## Safety
 
@@ -76,7 +82,7 @@ This installs the hub, the node (over the hub key — the node's root password i
 
 ```bash
 python -m pytest orchestrator/ hub/ -q
-# 219 tests — benchmarks, failover, safety gates, installer hygiene, wizard, join flow
+# 397 tests + 13 subtests — benchmarks, failover, safety gates, installer hygiene, wizard, join flow
 ```
 
 ## Layout
@@ -94,6 +100,7 @@ docs/             runbooks (phases, panel survey)
 
 - **Phases 1–4** — done Oct 26, 2026: engine, hub, dashboard, live install and live overlay-switch proof.
 - **Phase 5** — done Oct 27, 2026: public repo, tag `v1.0`.
+- **1.7.0** — done Nov 2, 2026: verified releases (`install.sh --release vX.Y.Z`, tarball checked against `SHA256SUMS` before anything is extracted, GitHub first with mirror fallback); persistent per-pair traffic totals; stability-aware scoring (latency + 2× jitter + 20× loss, with a stability penalty past 10 ms jitter / 2% loss); random private panel path (rotatable from the panel); one-click quick test and deploy-best; JSON backup and restore from the panel; a desktop demo panel (`hub.main --demo`, fake data, login `admin` / `demo-1234`); new protocols `fou-gre`, `ipip`, `wireguard`, `wireguard-fec`, `tcp-lanes`. Nothing in this release touches a live server: it is code and tests only, and deployment to a hub is a separate step.
 - **Installer 1.4.0** — done Oct 27, 2026: master/node join flow, no IP typing. BackPack-style menu, backup/restore, web panel, and optimize added Oct 28, 2026. Its live test happens on rebuild.
 
 ## Scope

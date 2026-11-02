@@ -7,6 +7,11 @@ Strictly implements continuous, independent normalization curves (B1 / P0-5):
 - S_stab: Continuous 30-second session survival score
 - Loss penalty: Quadratic penalty multiplier (1 - Loss%)^2 with smooth ramp gating
 - Profile-weighted aggregation for Balanced, Gaming, and Ultra-Speed
+- Effective latency and stutter tax (C-Tunnel-style): a link is felt
+  through eff = lat + 2*jitter + 20*loss_pct, so a steady 90 ms path
+  outranks a 60 ms path that stutters. The stutter tax starts biting
+  only past jitter 10 ms / loss 2%, so clean measurements score
+  exactly as before.
 """
 
 # Overhead is measured as a *fraction above the direct base RTT*: 1.5 means the tunnel takes 2.5x as
@@ -75,6 +80,20 @@ def compute_loss_penalty(loss_pct: float) -> float:
     p = clamp(loss_pct / 100.0, 0.0, 1.0)
     return round((1.0 - p) ** 2, 4)
 
+
+def compute_effective_latency(lat_avg: float, jitter: float, loss_pct: float) -> float:
+    """The latency a link is felt through: jitter counts double, each
+    percent of loss counts twenty times a millisecond of latency."""
+    return round(lat_avg + 2.0 * jitter + 20.0 * loss_pct, 2)
+
+
+def compute_stability_penalty(jitter: float, loss_pct: float) -> float:
+    """Stutter tax: 1.0 for a steady link (jitter <= 10 ms, loss <= 2%),
+    falling as jitter or loss grow past that. A jittery or lossy path
+    must not outrank a slower steady one on latency alone."""
+    excess = max(0.0, jitter - 10.0) / 25.0 + max(0.0, loss_pct - 2.0) * 0.06
+    return round(1.0 / (1.0 + excess), 4)
+
 PROFILES = {
     "balanced": {"w_lat": 0.35, "w_jit": 0.20, "w_stab": 0.25, "w_tp": 0.20},
     "gaming": {"w_lat": 0.50, "w_jit": 0.30, "w_stab": 0.15, "w_tp": 0.05},
@@ -99,6 +118,8 @@ def evaluate_tunnel_metrics(lat_avg: float, jitter: float, bulk_step: int,
                                                     throughput_measured=tp_was_measured)
     s_stab = compute_stab_score(seconds_survived)
     loss_penalty = compute_loss_penalty(loss_pct)
+    eff_latency = compute_effective_latency(lat_avg, jitter, loss_pct)
+    stability_penalty = compute_stability_penalty(jitter, loss_pct)
 
     # Smooth ramp penalty starting from 10% up to 25% (P0-4 harmonized)
     if loss_pct > 10.0 and loss_pct <= 25.0:
@@ -127,7 +148,7 @@ def evaluate_tunnel_metrics(lat_avg: float, jitter: float, bulk_step: int,
     scores_by_profile = {}
     for p_name, w in PROFILES.items():
         base = (w["w_stab"] * s_stab) + (w["w_lat"] * s_lat) + (w["w_jit"] * s_jit) + (w["w_tp"] * s_tp)
-        sc = base * loss_penalty * ramp_multiplier * 100.0
+        sc = base * loss_penalty * ramp_multiplier * stability_penalty * 100.0
         scores_by_profile[p_name] = 0.0 if disqualified else round(sc, 2)
 
     active_profile = profile if profile in PROFILES else "balanced"
@@ -147,6 +168,8 @@ def evaluate_tunnel_metrics(lat_avg: float, jitter: float, bulk_step: int,
             "s_stab": round(s_stab, 3),
             "loss_penalty": round(loss_penalty, 3),
             "ramp_multiplier": round(ramp_multiplier, 3),
+            "eff_latency_ms": eff_latency,
+            "stability_penalty": round(stability_penalty, 3),
             "loss_pct": round(loss_pct, 1),
             "lat_avg": round(lat_avg, 1),
             "jitter_ms": round(jitter, 2),

@@ -37,23 +37,45 @@ def main(argv=None) -> int:
                         help="PEM certificate for public HTTPS mode")
     parser.add_argument("--tls-key", default=None,
                         help="PEM private key for public HTTPS mode")
+    parser.add_argument("--demo", action="store_true",
+                        help="desktop demo: temp database with simulated"
+                             " tunnels, local only, no collector, no SSH")
     args = parser.parse_args(argv)
     if bool(args.tls_cert) != bool(args.tls_key):
         parser.error("--tls-cert and --tls-key must be given together")
-    store = Store(args.db)
-    server = serve(store, host=args.host, port=args.port,
-                   tls_cert=args.tls_cert, tls_key=args.tls_key,
-                   enable_collector=True)
-    # Every pair gets a spoof verdict, including pairs created before
-    # the gate landed; a failed enqueue here must never break startup.
-    try:
-        from hub import jobs as _jobs
-        _jobs.backfill_spoof_probes(store)
-    except Exception:
-        pass
-    scheme = "https" if args.tls_cert else "http"
-    print(f"rahyaab hub listening on {scheme}://{args.host}:{args.port} "
-          f"(db: {args.db})", flush=True)
+    if args.demo and (args.tls_cert or args.host != "127.0.0.1"):
+        parser.error("--demo is local only: no TLS, host 127.0.0.1")
+    if args.demo:
+        import tempfile
+        from hub import demo as _demo
+        tmpdir = tempfile.mkdtemp(prefix="rahyaab-demo-")
+        args.db = os.path.join(tmpdir, "hub.db")
+        store = Store(args.db)
+        seeded = _demo.seed_demo_store(store)
+        server = serve(store, host="127.0.0.1", port=args.port,
+                       enable_collector=False)
+        print("DEMO DATA — no real servers, no tunnels, nothing leaves"
+              " this machine.", flush=True)
+        print(f"demo panel: http://127.0.0.1:{args.port}/ "
+              f"(login: {_demo.DEMO_USERNAME} / {_demo.DEMO_PASSWORD})",
+              flush=True)
+        print(f"demo data: {seeded['servers']} servers, {seeded['pairs']} pairs"
+              f" (temp db: {args.db})", flush=True)
+    else:
+        store = Store(args.db)
+        server = serve(store, host=args.host, port=args.port,
+                       tls_cert=args.tls_cert, tls_key=args.tls_key,
+                       enable_collector=True)
+        # Every pair gets a spoof verdict, including pairs created before
+        # the gate landed; a failed enqueue here must never break startup.
+        try:
+            from hub import jobs as _jobs
+            _jobs.backfill_spoof_probes(store)
+        except Exception:
+            pass
+        scheme = "https" if args.tls_cert else "http"
+        print(f"rahyaab hub listening on {scheme}://{args.host}:{args.port} "
+              f"(db: {args.db})", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

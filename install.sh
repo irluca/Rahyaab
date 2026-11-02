@@ -39,10 +39,14 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
+# Verified-release install: --release vX.Y.Z downloads the release
+# tarball plus its SHA256SUMS and refuses to install anything when a
+# hash does not match. Empty = the default branch-tarball download.
+RELEASE="${RAHYAAB_RELEASE:-}"
 INSTALL_DIR="/opt/rahyaab"
 DATA_DIR="/var/lib/rahyaab"
 CONF_DIR="/etc/rahyaab"
@@ -177,6 +181,8 @@ Options:
   --local DIR         Install code from local files (instead of downloading)
   --repo OWNER/REPO   GitHub repository (default: $REPO)
   --branch BRANCH     Branch (default: $BRANCH)
+  --release TAG       Install a published release tarball, verified against
+                      its SHA256SUMS before anything is changed (e.g. v1.7.0)
   --yes               No confirmation prompts
   --force             Skip the OS check
   --check-only        Check only, no install
@@ -206,6 +212,7 @@ parse_args() {
             --local)    LOCAL_SRC="$2"; shift 2 ;;
             --repo)     REPO="$2"; shift 2 ;;
             --branch)   BRANCH="$2"; shift 2 ;;
+            --release)  RELEASE="$2"; shift 2 ;;
             --bbr)      BBR=1; shift ;;
             --ip-cert)  IP_CERT=1; shift ;;
             --yes)      YES=1; shift ;;
@@ -283,10 +290,58 @@ install_deps() { # $1 = hub|node
     ok "Dependencies installed"
 }
 
+# -- verify-sha256 begin --
+# Verify one file against a SHA256SUMS manifest before anything is
+# changed: the entry must exist, name exactly this file, and carry a
+# 64-hex hash that matches. Any failure dies with nothing changed.
+# (Extracted verbatim by orchestrator/test_installer_release.py.)
+verify_sha256_file() { # $1 = file, $2 = SHA256SUMS
+    local file="$1" sums="$2" base line
+    base="$(basename "$file")"
+    line="$(awk -v name="$base" '$2 == name && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ {print}' "$sums")"
+    [ -n "$line" ] || die "$base is not listed in SHA256SUMS with a valid hash. Nothing was changed."
+    (cd "$(dirname "$file")" && echo "$line" | sha256sum -c --status) \
+        || die "SHA256 mismatch for $base. Nothing was changed."
+}
+# -- verify-sha256 end --
+
+fetch_release_code() { # verified release tarball; nothing changes on failure
+    step "Fetching verified release $RELEASE"
+    local base="https://github.com/${REPO}/releases/download/${RELEASE}"
+    local tgz="/tmp/rahyaab-${RELEASE}.tar.gz" sums="/tmp/rahyaab-${RELEASE}.SHA256SUMS"
+    local newdir="/tmp/rahyaab-new"
+    # GitHub first, mirrors as fallback - the same canonical loop the
+    # binary installers carry (test_38 audits it byte-for-byte), and
+    # the bytes are authorised by the SHA256SUMS check below, never by
+    # the source they arrived from.
+    local URL ok_dl
+    URL="$base/rahyaab-${RELEASE}.tar.gz"
+    ok_dl=0
+    for u in "$URL" "https://ghproxy.net/$URL" "https://mirror.ghproxy.com/$URL" "https://gh.ddlc.top/$URL"; do
+        if curl -fsSL -o "$tgz" "$u"; then ok_dl=1; break; fi
+    done
+    [ "$ok_dl" -eq 1 ] || die "Release download failed (no such release asset?). Nothing was changed."
+    URL="$base/SHA256SUMS"
+    ok_dl=0
+    for u in "$URL" "https://ghproxy.net/$URL" "https://mirror.ghproxy.com/$URL" "https://gh.ddlc.top/$URL"; do
+        if curl -fsSL -o "$sums" "$u"; then ok_dl=1; break; fi
+    done
+    [ "$ok_dl" -eq 1 ] || die "SHA256SUMS download failed. Nothing was changed."
+    verify_sha256_file "$tgz" "$sums"
+    rm -rf "$newdir" && mkdir -p "$newdir"
+    tar -xzf "$tgz" -C "$newdir" || die "Release archive is corrupt. Nothing was changed."
+    [ -f "$newdir/hub/main.py" ] || die "hub/main.py is not in the release. Nothing was changed."
+    rm -rf "$INSTALL_DIR" && mv "$newdir" "$INSTALL_DIR"
+    rm -f "$tgz" "$sums"
+    ok "Verified release $RELEASE installed"
+}
+
 fetch_code() {
     step "Fetching Rahyaab code"
     mkdir -p "$INSTALL_DIR"
-    if [ -n "$LOCAL_SRC" ]; then
+    if [ -n "$RELEASE" ]; then
+        fetch_release_code
+    elif [ -n "$LOCAL_SRC" ]; then
         [ -d "$LOCAL_SRC" ] || die "Local directory not found: $LOCAL_SRC"
         [ -f "$LOCAL_SRC/hub/main.py" ] || die "hub/main.py is not in the local directory; pass the repository root"
         (cd "$LOCAL_SRC" && tar --exclude=.git --exclude=__pycache__ --exclude='*.pyc' -cf - .) \
@@ -302,6 +357,7 @@ fetch_code() {
         if ! curl -fsSL "${auth_args[@]}" -o /tmp/rahyaab.tgz "$url"; then
             die "Download failed (GitHub returns 404 for a private repo without a token). Two options: (1) copy the code to the server with SCP and install with --local <dir>; (2) create a read-only token (fine-grained PAT, only this repo) and rerun with GITHUB_TOKEN=<token>. Do not store the token in a file or shell history."
         fi
+        tar -tzf /tmp/rahyaab.tgz >/dev/null || die "Downloaded archive is corrupt or truncated. Nothing was extracted."
         tar -xzf /tmp/rahyaab.tgz --strip-components=1 -C "$INSTALL_DIR"
         rm -f /tmp/rahyaab.tgz
         ok "Code downloaded and extracted"
@@ -649,11 +705,13 @@ pin_self_host_key() { # Pin this host's own key into root known_hosts
 # tag and the requested (or default 20) base, so its pairs can share
 # nodes with the first hub without colliding.
 seed_hub_identity() {
-    local tag base
+    local tag base panel
     tag="$(openssl rand -hex 2 2>/dev/null || echo "")"
     [ -n "$tag" ] || die "Could not generate a hub tag (openssl failed)"
+    panel="panel-$(openssl rand -hex 8 2>/dev/null || echo "")"
+    [ "$panel" != "panel-" ] || die "Could not generate a panel path (openssl failed)"
     base="${INNER_BASE:-20}"
-    HUB_TAG_SEED="$tag" HUB_BASE_SEED="$base" python3 - <<'PYEOF'
+    HUB_TAG_SEED="$tag" HUB_BASE_SEED="$base" HUB_PANEL_SEED="$panel" python3 - <<'PYEOF'
 import os
 import sqlite3
 db = "/var/lib/rahyaab/hub.db"
@@ -676,6 +734,11 @@ try:
     if "inner_base" not in have:
         conn.execute("INSERT INTO settings (key, value) VALUES ('inner_base', ?)",
                      (str(10 if pairs else base),))
+    # A fresh hub gets a private panel path; a hub with pairs keeps the
+    # root it already serves, so an update never moves the panel URL.
+    if "panel_path" not in have:
+        conn.execute("INSERT INTO settings (key, value) VALUES ('panel_path', ?)",
+                     ("" if pairs else os.environ.get("HUB_PANEL_SEED") or "",))
     conn.commit()
 finally:
     conn.close()
@@ -1164,7 +1227,15 @@ summary() {
         if [ -z "$cert" ]; then
             box "Panel: local only (127.0.0.1:8890 on this server)"
         else
-            box "Panel: https://$host:$HUB_PORT"
+            local panel_path=""
+            if [ -f "$HUB_DB" ]; then
+                panel_path="$(python3 -c 'import sqlite3,sys; r=sqlite3.connect(sys.argv[1]).execute("SELECT value FROM settings WHERE key='"'"'panel_path'"'"'").fetchone(); print(r[0] if r else "")' "$HUB_DB" 2>/dev/null || true)"
+            fi
+            if [ -n "$panel_path" ]; then
+                box "Panel: https://$host:$HUB_PORT/$panel_path/"
+            else
+                box "Panel: https://$host:$HUB_PORT"
+            fi
         fi
         users=""
         if [ -f "$HUB_DB" ]; then

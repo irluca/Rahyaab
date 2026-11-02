@@ -64,7 +64,7 @@ def _fakes():
         calls["deploy"] = (pair, protocol)
         return {"status": "ACTIVE-GRE-443"}
 
-    def install_fn(iran, foreign, pid, name, port, protocol, scores, key):
+    def install_fn(iran, foreign, pid, name, port, protocol, scores, key, **kwargs):
         calls["install"] = (iran, foreign, pid, name, port, protocol, scores, key)
         return {"active": "active", "heartbeat": {"verdicts": {"1": "HEALTHY"}}}
 
@@ -83,7 +83,7 @@ def test_run_setup_wiring(tmp_path):
         hub_db_path=str(tmp_path / "hub.db"), hub_key_path="/etc/rahyaab/hub_key",
         known_hosts_path=str(kh), pin_fn=lambda h, p, t, b: None,
         measure_fn=measure_fn, deploy_fn=deploy_fn, install_fn=install_fn,
-        record_fn=record_fn)
+        record_fn=record_fn, preflight=False)
     assert summary["protocol"] == "GRE"
     assert summary["score"] == 99.9
     assert summary["deploy_status"] == "ACTIVE-GRE-443"
@@ -108,7 +108,7 @@ def test_run_setup_refuses_non_positive_score(tmp_path):
             hub_db_path=str(tmp_path / "hub.db"), hub_key_path="/etc/rahyaab/hub_key",
             known_hosts_path=str(kh), pin_fn=lambda h, p, t, b: None,
             measure_fn=bad_measure, deploy_fn=deploy_fn, install_fn=install_fn,
-            record_fn=record_fn)
+            record_fn=record_fn, preflight=False)
     assert "deploy" not in calls
     assert "install" not in calls
     assert "record" not in calls

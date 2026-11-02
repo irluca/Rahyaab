@@ -471,32 +471,41 @@ def _sweep_pidfile(pair_id):
     return os.path.join(base, "sweep-p%d.pid" % int(pair_id))
 
 
-def _sweep_running(pair_id):
-    """True while a sweep scope unit is active or its pidfile is alive.
-
-    The unit check is primary (the runner survives hub restarts in its
-    own scope); the pidfile covers runners started outside systemd.
+def _unit_or_pid_alive(unit: str, pidfile: str) -> bool:
+    """True while a scope unit is active or its pidfile's pid lives.
     Any check failure means 'not running' — a stale marker must never
-    block a fresh sweep forever.
-    """
+    block a fresh run forever."""
     import os
     import subprocess
     try:
-        rc = subprocess.run(
-            ["systemctl", "is-active",
-             "rahyaab-sweep-p%d.scope" % int(pair_id)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        rc = subprocess.run(["systemctl", "is-active", unit],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL).returncode
         if rc == 0:
             return True
     except Exception:
         pass
     try:
-        with open(_sweep_pidfile(pair_id)) as f:
+        with open(pidfile) as f:
             pid = int(f.read().strip().split()[0])
         os.kill(pid, 0)
         return True
     except (OSError, ValueError):
         return False
+
+
+def _sweep_running(pair_id):
+    """True while a sweep scope unit is active or its pidfile is alive.
+
+    The unit check is primary (the runner survives hub restarts in its
+    own scope); the pidfile covers runners started outside systemd.
+    A quick test counts too: both suites share the bench ports, so
+    only one bench suite runs per pair at a time.
+    """
+    return (_unit_or_pid_alive("rahyaab-sweep-p%d.scope" % int(pair_id),
+                               _sweep_pidfile(pair_id))
+            or _unit_or_pid_alive("rahyaab-quicktest-p%d.scope" % int(pair_id),
+                                  _quicktest_pidfile(pair_id)))
 
 
 def _spawn_sweep(argv):
@@ -594,6 +603,49 @@ def _handle_sweep(store, job, make_executor):
             "unit": "rahyaab-sweep-p%d.scope" % pair_id, "log": log}
 
 
+def _quicktest_pidfile(pair_id):
+    import os
+    base = os.environ.get("RAHYAAB_SWEEP_DIR", "/var/lib/rahyaab")
+    return os.path.join(base, "quicktest-p%d.pid" % int(pair_id))
+
+
+def _quicktest_running(pair_id):
+    """Mirror of _sweep_running for the quick-test scope unit. A sweep
+    counts too: both suites share the bench ports."""
+    return (_unit_or_pid_alive("rahyaab-quicktest-p%d.scope" % int(pair_id),
+                               _quicktest_pidfile(pair_id))
+            or _unit_or_pid_alive("rahyaab-sweep-p%d.scope" % int(pair_id),
+                                  _sweep_pidfile(pair_id)))
+
+
+def _handle_quick_test(store, job, make_executor):
+    """Spawn the quick test in its own scope and return at once, like
+    a sweep: the job row goes done at spawn, the scope's log and the
+    quick_tests row carry the result. Never touches the live tunnel
+    (bench namespace only) or candidate_scores."""
+    import os
+    import shlex
+    import sys
+    pair = store.get_pair(job["pair_id"]) if job.get("pair_id") else None
+    if pair is None:
+        raise ValueError("quick_test job has no pair")
+    pair_id = pair["id"]
+    if _quicktest_running(pair_id):
+        return {"status": "already-running", "pair_id": pair_id}
+    script = _sweep_script_path()
+    if not os.path.exists(script):
+        raise FileNotFoundError("sweep runner not found: %s" % script)
+    log = "/var/log/rahyaab-quicktest-p%d.log" % pair_id
+    inner = "%s %s --pair-id %d --hub-db %s --quick > %s 2>&1; echo EXIT_CODE:$? >> %s" % (
+        shlex.quote(sys.executable), shlex.quote(script), pair_id,
+        shlex.quote(str(store.db_path)), shlex.quote(log), shlex.quote(log))
+    argv = ["systemd-run", "--scope", "--unit=rahyaab-quicktest-p%d" % pair_id,
+            "bash", "-c", inner]
+    _spawn_sweep(argv)
+    return {"status": "started", "pair_id": pair_id,
+            "unit": "rahyaab-quicktest-p%d.scope" % pair_id, "log": log}
+
+
 HANDLERS = {
     "healer_status": _handle_healer_status,
     "connectivity": _handle_connectivity,
@@ -602,6 +654,7 @@ HANDLERS = {
     "change_port": _handle_change_port,
     "full_setup": _handle_full_setup,
     "sweep": _handle_sweep,
+    "quick_test": _handle_quick_test,
     "spoof_probe": _handle_spoof_probe,
 }
 
