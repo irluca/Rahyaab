@@ -618,7 +618,13 @@ class FailoverManager:
         check, the old transport is restored by re-enabling those units -
         a rollback in seconds, not a redeploy. A successful switchover
         leaves the record until the grace window expires, when the
-        monitor's purge finally runs the stored teardown.
+        monitor's purge finally runs the stored teardown. Carriers
+        cannot be quarantined (their teardown deletes the files a
+        re-enable would need, and their DNAT must move), so on a
+        successor failure a carrier predecessor is instead REDEPLOYED
+        by _restore_carrier — and left in place even when it cannot
+        verify, so a path that recovers later heals without a human
+        redeploy.
 
         is_rollback: this execution restores the transport that was
         healthy before the switch being undone. It skips the circuit
@@ -762,6 +768,11 @@ class FailoverManager:
                 "current_protocol": current_protocol
             }
 
+        # Set only once Stage 3 has torn a carrier predecessor down (see
+        # below): from that point an exception must attempt the carrier
+        # restore, or it strands the pair exactly like a smoke failure.
+        carrier_torn_down = False
+        new_plan = None
         try:
             # Peel: the current transport is an overlay riding an
             # underlay, and the target is that underlay carrier. The
@@ -948,6 +959,8 @@ class FailoverManager:
                                       f"old carrier DNAT for {old_dnat_target} "
                                       "still present after teardown purge")
             engine.retract_carrier(pair_id, current_protocol, dry_run)
+            if current_protocol in protocols.CARRIER_PROTOCOLS:
+                carrier_torn_down = True
 
             # Ensure frontend port is strictly released before activating new successor
             ir_runner.run(f"fuser -k {frontend}/tcp 2>/dev/null || true", best_effort=True)
@@ -1047,6 +1060,7 @@ class FailoverManager:
                 err_msg = f"Smoke verification failed for replacement protocol {target_protocol}: {smoke_detail}"
                 storage.log_audit(pair_id, "FAILOVER_FAILED", "SMOKE_ERROR", err_msg)
                 restored = False
+                restore_info = None
                 if quarantined is not None:
                     # The whole point of the quarantine: the old units are
                     # still on disk with their configs, so restoring them
@@ -1064,10 +1078,50 @@ class FailoverManager:
                     storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORED",
                                       f"Successor {target_protocol} failed smoke; "
                                       f"restored {current_protocol} from quarantine")
+                elif current_protocol in protocols.CARRIER_PROTOCOLS:
+                    # Carriers are excepted from quarantine, so their
+                    # teardown deleted the predecessor outright. Without
+                    # a redeploy here, the pair ends with no deployment
+                    # at all (2026-11-03, ESP -> GRE): the guard's
+                    # `systemctl start` of deleted units is a no-op, and
+                    # the healer's "restart the old units" is one too.
+                    try:
+                        restore_info = self._restore_carrier(
+                            pair, plan_for, current_protocol, new_plan,
+                            target_protocol, ir_runner, fr_runner, dry_run)
+                    except Exception as restore_err:
+                        restore_info = {"redeployed": False, "verified": False,
+                                        "detail": f"restore raised: {restore_err}"}
+                    if restore_info.get("verified"):
+                        storage.update_pair_status(pair_id, status="ACTIVE",
+                                                   active_tunnel=current_protocol)
+                        engine.declare_carrier(pair_id, current_protocol, dry_run,
+                                               tag=protocols.pair_tag(pair),
+                                               base=protocols.pair_base(pair))
+                        restored = True
+                        storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORED",
+                                          f"Successor {target_protocol} failed smoke; "
+                                          f"redeployed {current_protocol}: "
+                                          f"{restore_info.get('detail')}")
+                    elif restore_info.get("redeployed"):
+                        # Left in place on purpose (see _restore_carrier):
+                        # the path may still be dead, but the deployment
+                        # exists again, so a later healthy pass recovers
+                        # without a human redeploy.
+                        storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORE_UNVERIFIED",
+                                          f"Successor {target_protocol} failed smoke; "
+                                          f"{current_protocol} redeployed but unverified: "
+                                          f"{restore_info.get('detail')}")
+                    else:
+                        storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORE_FAILED",
+                                          f"Successor {target_protocol} failed smoke; "
+                                          f"could not redeploy {current_protocol}: "
+                                          f"{restore_info.get('detail')}")
                 return {
                     "success": False,
                     "error": err_msg,
                     "restored": restored,
+                    "predecessor_restored": restore_info,
                     "current_protocol": current_protocol,
                     "attempted_protocol": target_protocol
                 }
@@ -1099,9 +1153,45 @@ class FailoverManager:
         except Exception as e:
             err_msg = f"Exception during failover switchover: {str(e)}"
             storage.log_audit(pair_id, "FAILOVER_FAILED", "EXCEPTION", err_msg)
+            restore_info = None
+            restored = False
+            if carrier_torn_down and new_plan is not None:
+                # Same stranding as a smoke failure, one level up: the
+                # predecessor is already deleted, so an exception after
+                # Stage 3 must not just report and leave nothing.
+                try:
+                    restore_info = self._restore_carrier(
+                        pair, plan_for, current_protocol, new_plan,
+                        target_protocol, ir_runner, fr_runner, dry_run)
+                except Exception as restore_err:
+                    restore_info = {"redeployed": False, "verified": False,
+                                    "detail": f"restore raised: {restore_err}"}
+                if restore_info.get("verified"):
+                    storage.update_pair_status(pair_id, status="ACTIVE",
+                                               active_tunnel=current_protocol)
+                    engine.declare_carrier(pair_id, current_protocol, dry_run,
+                                           tag=protocols.pair_tag(pair),
+                                           base=protocols.pair_base(pair))
+                    restored = True
+                    storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORED",
+                                      f"Exception during switch to {target_protocol}; "
+                                      f"redeployed {current_protocol}: "
+                                      f"{restore_info.get('detail')}")
+                elif restore_info.get("redeployed"):
+                    storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORE_UNVERIFIED",
+                                      f"Exception during switch to {target_protocol}; "
+                                      f"{current_protocol} redeployed but unverified: "
+                                      f"{restore_info.get('detail')}")
+                else:
+                    storage.log_audit(pair_id, "FAILOVER_ROLLBACK", "RESTORE_FAILED",
+                                      f"Exception during switch to {target_protocol}; "
+                                      f"could not redeploy {current_protocol}: "
+                                      f"{restore_info.get('detail')}")
             return {
                 "success": False,
                 "error": err_msg,
+                "restored": restored,
+                "predecessor_restored": restore_info,
                 "current_protocol": current_protocol,
                 "attempted_protocol": target_protocol
             }
@@ -1150,6 +1240,105 @@ class FailoverManager:
         except Exception:
             return False
         return True
+
+    def _restore_carrier(self, pair, plan_for, protocol, successor_plan,
+                         successor_protocol, ir_runner, fr_runner, dry_run):
+        """Redeploy a carrier that a failed switchover just tore down.
+
+        2026-11-03 live, pair 1: a failed ESP -> GRE switch deleted ESP's
+        unit files, batch files, SAs and DNAT (carriers are excepted from
+        quarantine, so the failure path's `restored` was False), and the
+        atomic guard's restore — `systemctl start` of the old units —
+        could not help, because the units it was asked to start no longer
+        existed, and a unit start would not have re-added the DNAT
+        anyway. The healer then cycled through every remaining candidate,
+        each attempt ending the same way, and the pair sat with NO
+        deployment at all until a human redeployed ESP by hand.
+
+        So a failed switch away from a carrier must put the carrier back
+        itself, in this order: tear the failed successor down (and purge
+        its DNAT if it is a carrier, so it cannot shadow the restore),
+        redeploy the predecessor from a fresh plan (new keys where the
+        protocol has them, the same shape tonight's manual redeploy
+        used), re-apply its manifest DNAT rows, and verify. The one
+        deliberate difference from a normal deploy: a restore that
+        cannot verify is LEFT IN PLACE, not torn down again. Its path
+        may still be dead — that is why the switch failed in the first
+        place — but a deployment whose path recovers heals itself on
+        the next health pass, while a deleted deployment never does.
+        The caller stamps ACTIVE and re-declares the carrier only when
+        the restore verifies; an unverified restore is reported as
+        such, never as a success. Scope note: this covers failover_fn
+        returning, failed or not. A process death between Stage 3 and
+        this restore would still leave the guard with deleted units to
+        start — that crash window is unchanged by this fix.
+        """
+        pair_id = pair.get("id", 1)
+        frontend = pair.get("frontend_port", pair.get("frontend", 443))
+        old_plan = plan_for(protocol)
+        # 1. Remove the failed successor, so its DNAT (carrier) or its
+        # listener (overlay) cannot shadow or occupy the restore.
+        for cmd in successor_plan.get("teardown_iran", []):
+            ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+        for cmd in successor_plan.get("teardown_foreign", []):
+            fr_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+        if not dry_run and successor_protocol in protocols.CARRIER_PROTOCOLS:
+            succ_peer = protocols.carrier_inner_pair(
+                successor_protocol, pair_id, "prod",
+                protocols.pair_base(pair))[1]
+            purge_carrier_dnat(
+                ir_runner,
+                _carrier_dnat_cmds(successor_plan.get("teardown_iran", [])),
+                f"{succ_peer}:{frontend}")
+        # 2. Redeploy the predecessor, best effort throughout: one
+        # duplicate iptables rule must not abort the restore.
+        failures = []
+        for fpath, content in old_plan.get("iran_files", {}).items():
+            ir_runner.write_file(fpath, content)
+        for fpath, content in old_plan.get("foreign_files", {}).items():
+            fr_runner.write_file(fpath, content)
+        for cmd in old_plan.get("iran_cmds", []):
+            rc, _o, _e = ir_runner.run(cmd, best_effort=True)
+            if rc:
+                failures.append(f"iran: {cmd[:80]}")
+        for cmd in old_plan.get("foreign_cmds", []):
+            rc, _o, _e = fr_runner.run(cmd, best_effort=True)
+            if rc:
+                failures.append(f"foreign: {cmd[:80]}")
+        if old_plan.get("foreign_units"):
+            fr_runner.run("systemctl daemon-reload", best_effort=True)
+            for u in old_plan["foreign_units"]:
+                fr_runner.run(f"systemctl enable --now {u}", best_effort=True)
+        if old_plan.get("iran_units"):
+            ir_runner.run("systemctl daemon-reload", best_effort=True)
+            for u in old_plan["iran_units"]:
+                ir_runner.run(f"systemctl enable --now {u}", best_effort=True)
+        self._manifest_set_dnat(ir_runner, old_plan, protocol, pair_id, keep=True)
+        # 3. Verify, on the same bar Stage 6 holds a carrier to — inner
+        # reachability plus its DNAT in force. A dry run skips the live
+        # reads, the same convention Stage 6 uses.
+        if dry_run:
+            verified = True
+            detail = "dry run: restore staged, live verification skipped"
+        else:
+            units_ok = True
+            for runner, units in ((ir_runner, old_plan.get("iran_units", [])),
+                                  (fr_runner, old_plan.get("foreign_units", []))):
+                for u in units:
+                    _, o_st, _ = runner.run(f"systemctl is-active {u}", best_effort=True)
+                    if o_st.strip() != "active":
+                        units_ok = False
+            reached, ping_detail = engine.carrier_inner_reachable(
+                ir_runner, protocol, pair_id,
+                tag=protocols.pair_tag(pair), base=protocols.pair_base(pair))
+            _, o_nat, _ = ir_runner.run("iptables -t nat -S PREROUTING", best_effort=True)
+            peer = protocols.carrier_inner_pair(
+                protocol, pair_id, "prod", protocols.pair_base(pair))[1]
+            dnat_ok = f"--to-destination {peer}:{frontend}" in o_nat
+            verified = bool(units_ok and reached and dnat_ok)
+            detail = (f"units_ok={units_ok} inner={ping_detail} "
+                      f"dnat_in_force={dnat_ok} cmd_failures={failures}")
+        return {"redeployed": True, "verified": verified, "detail": detail}
 
     def _peel_to_underlay(self, pair, plan_for, current_protocol, target_protocol,
                           reason, dry_run, ir_runner, fr_runner, t_start):

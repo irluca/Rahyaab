@@ -39,7 +39,7 @@
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-VERSION="1.8.1"
+VERSION="1.8.2"
 # Default repository; override with --repo or --local.
 REPO="${RAHYAAB_REPO:-irluca/Rahyaab}"
 BRANCH="${RAHYAAB_BRANCH:-main}"
