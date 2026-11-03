@@ -452,6 +452,48 @@ def _carrier_dnat_cmds(cmds: list[str]) -> list[str]:
     return [c for c in cmds if "PREROUTING" in c and "DNAT" in c]
 
 
+def purge_carrier_dnat(ir_runner, delete_cmds: list[str], dnat_target: str,
+                       max_rounds: int = 5) -> bool:
+    """Delete a carrier's frontend DNAT until no rule for it remains.
+
+    2026-11-03 live incident (pair 1, GRE -> ESP): the switch reported
+    success, the ESP inner ping was healthy, yet every client packet
+    was still DNATed to the dead GRE inner. A stale GRE DNAT sat ahead
+    of the ESP DNAT in PREROUTING, and iptables matches top-down, so
+    the ESP rule never saw a packet. A single `iptables -D` removes
+    one copy, but repeated deploys can leave duplicate copies behind
+    (the port-change path already notes duplicates on live hosts), so
+    deleting once is not a guarantee. This helper re-reads PREROUTING
+    after each round and only returns True when no rule forwarding to
+    `dnat_target` (e.g. "10.10.11.2:21232") is left. It returns False
+    when the target is still present after `max_rounds`, so the caller
+    can refuse to commit a switch that would be shadowed instead of
+    reporting a healthy tunnel that carries no client traffic.
+    """
+    if not delete_cmds:
+        return False
+    for _ in range(max_rounds):
+        try:
+            _, o_nat, _ = ir_runner.run(
+                "iptables -t nat -S PREROUTING", best_effort=True)
+        except Exception:
+            return False
+        if f"--to-destination {dnat_target}" not in (o_nat or ""):
+            return True
+        for cmd in delete_cmds:
+            try:
+                ir_runner.run(cmd, best_effort=True,
+                              timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+            except Exception:
+                pass
+    try:
+        _, o_nat, _ = ir_runner.run(
+            "iptables -t nat -S PREROUTING", best_effort=True)
+    except Exception:
+        return False
+    return f"--to-destination {dnat_target}" not in (o_nat or "")
+
+
 def _manifest_dnat_rows(rows: list[str]) -> list[str]:
     """Manifest rows (R|table|PREROUTING|verb|pos|spec) that install a DNAT.
 
@@ -837,6 +879,7 @@ class FailoverManager:
             # it is seeing.
             old_plan = plan_for(current_protocol)
             quarantined = None
+            old_dnat_target = None
             _underlay = _underlay_protocol(pair, current_protocol)
             if (current_protocol not in protocols.INNER_PROBED
                     and target_protocol in protocols.CARRIER_PROTOCOLS
@@ -883,6 +926,27 @@ class FailoverManager:
             # A carrier is not just another unit: tearing it down removes the envelope every other
             # transport is judged against, so its declaration leaves with it. Left behind, a later REALITY
             # deploy would read 'esp' on a pair that can now only offer cleartext proto 47.
+            # 2026-11-03: the teardown above deletes each DNAT once, which
+            # leaves a duplicate copy behind to shadow the successor (a
+            # stale GRE DNAT ahead of the new ESP DNAT in PREROUTING
+            # carried no client traffic to ESP at all, while the inner
+            # ping stayed healthy). Purge until the old destination is
+            # actually gone; the post-deploy purge below retries, so a
+            # failure here is a warning, not yet a verdict.
+            old_dnat_target = None
+            if not dry_run and current_protocol in protocols.CARRIER_PROTOCOLS:
+                old_peer = protocols.carrier_inner_pair(
+                    current_protocol, pair_id, "prod",
+                    protocols.pair_base(pair))[1]
+                old_dnat_target = f"{old_peer}:{frontend}"
+                if not purge_carrier_dnat(
+                        ir_runner,
+                        _carrier_dnat_cmds(old_plan.get("teardown_iran", [])),
+                        old_dnat_target):
+                    storage.log_audit(pair_id, "FAILOVER_STALE_DNAT",
+                                      "STALE_DNAT_AFTER_TEARDOWN",
+                                      f"old carrier DNAT for {old_dnat_target} "
+                                      "still present after teardown purge")
             engine.retract_carrier(pair_id, current_protocol, dry_run)
 
             # Ensure frontend port is strictly released before activating new successor
@@ -916,6 +980,25 @@ class FailoverManager:
             smoke_detail = ""
             transport_only = False
             transport_only_detail = ""
+            # Carrier-to-carrier only: the inner ping below passes even
+            # when a stale DNAT shadows the successor, which is exactly
+            # how the 2026-11-03 GRE -> ESP switch reported success
+            # while no client packet reached ESP. Purge once more now
+            # that the successor is up, and refuse to commit if the old
+            # destination is still in PREROUTING: the failure path then
+            # rolls back instead of stamping a shadowed tunnel ACTIVE.
+            if (not dry_run and old_dnat_target
+                    and current_protocol in protocols.CARRIER_PROTOCOLS
+                    and target_protocol in protocols.CARRIER_PROTOCOLS):
+                if not purge_carrier_dnat(
+                        ir_runner,
+                        _carrier_dnat_cmds(old_plan.get("teardown_iran", [])),
+                        old_dnat_target):
+                    smoke_ok = False
+                    smoke_detail = (
+                        f"stale frontend DNAT for {current_protocol} "
+                        f"({old_dnat_target}) still in force after purge; "
+                        f"successor {target_protocol} would be shadowed")
             for u in new_plan.get("iran_units", []):
                 _, o_st, _ = ir_runner.run(f"systemctl is-active {u}", best_effort=True)
                 if o_st.strip() != "active":
@@ -1223,8 +1306,15 @@ class FailoverManager:
             carrier_plan = plan_for(current_protocol)
         except Exception as plan_err:
             return _failed(f"Failed to generate carrier plan for cutover: {plan_err}")
-        for cmd in _carrier_dnat_cmds(carrier_plan.get("teardown_iran", [])):
-            ir_runner.run(cmd, best_effort=True, timeout=protocols.TEARDOWN_TIMEOUT_SEC)
+        # Purge, not one delete: duplicate DNAT copies (2026-11-03)
+        # would otherwise survive cutover and keep shadowing the
+        # overlay; the verification below stays as the backstop.
+        _cutover_peer = protocols.carrier_inner_pair(
+            current_protocol, pair_id, "prod", protocols.pair_base(pair))[1]
+        purge_carrier_dnat(
+            ir_runner,
+            _carrier_dnat_cmds(carrier_plan.get("teardown_iran", [])),
+            f"{_cutover_peer}:{frontend}")
         if not self._manifest_set_dnat(ir_runner, carrier_plan, current_protocol, pair_id, keep=False):
             # Manifest read but not writable: revert the live cutover
             # rather than leave a reboot that re-shadows the overlay.

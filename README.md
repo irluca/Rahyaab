@@ -82,7 +82,7 @@ This installs the hub, the node (over the hub key — the node's root password i
 
 ```bash
 python -m pytest orchestrator/ hub/ -q
-# 421 tests + 13 subtests — benchmarks, failover, safety gates, installer hygiene, wizard, join flow
+# 424 tests + 13 subtests — benchmarks, failover, safety gates, installer hygiene, wizard, join flow
 ```
 
 ## Layout
@@ -102,6 +102,7 @@ docs/             runbooks (phases, panel survey)
 - **Phase 5** — done Oct 27, 2026: public repo, tag `v1.0`.
 - **1.7.0** — done Nov 2, 2026: verified releases (`install.sh --release vX.Y.Z`, tarball checked against `SHA256SUMS` before anything is extracted, GitHub first with mirror fallback); persistent per-pair traffic totals; stability-aware scoring (latency + 2× jitter + 20× loss, with a stability penalty past 10 ms jitter / 2% loss); random private panel path (rotatable from the panel); one-click quick test and deploy-best; JSON backup and restore from the panel; a desktop demo panel (`hub.main --demo`, fake data, login `admin` / `demo-1234`); new protocols `fou-gre`, `ipip`, `wireguard`, `wireguard-fec`, `tcp-lanes`. Nothing in this release touches a live server: it is code and tests only, and deployment to a hub is a separate step.
 - **1.8.0** — done Nov 2, 2026: IPv6 reverse mode. A per-pair IPv6 readiness probe (auto-enqueued after setup and on hub start, re-runnable from the panel) tests each direction with a real TCP connect and reports them separately, because live measurement showed foreign→Iran IPv6 passes while Iran→foreign is blocked. `tcp-lanes-v6` — the same 8 lanes, but the foreign client dials Iran's global IPv6 and the Iran server listens dual-stack — is benched by sweeps and quick tests only for pairs whose probe passed the reverse direction, and switches to it resolve the Iran address off the live host at switch time, refusing cleanly when it is gone. The inner path stays IPv4. Nothing in this release touches a live server: it is code and tests only, and deployment to a hub is a separate step.
+- **1.8.1** — done Nov 3, 2026: stale-carrier DNAT purge. A live GRE -> ESP switch reported success while a stale GRE DNAT ahead of the ESP DNAT in PREROUTING sent every client packet to the dead GRE inner (the ESP inner ping stayed healthy, so nothing looked wrong). Carrier switches now purge the old carrier's DNAT until it is actually gone from PREROUTING — a single `iptables -D` removes only one copy, and repeated deploys can leave duplicates — and a carrier-to-carrier switch refuses to commit if the old destination is still in force after the purge, so it rolls back instead of stamping a shadowed tunnel ACTIVE. The same purge is used at overlay cutover. Nothing in this release touches a live server: it is code and tests only, and deployment to a hub is a separate step.
 - **Installer 1.4.0** — done Oct 27, 2026: master/node join flow, no IP typing. BackPack-style menu, backup/restore, web panel, and optimize added Oct 28, 2026. Its live test happens on rebuild.
 
 ## Scope
